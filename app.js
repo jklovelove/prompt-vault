@@ -1235,6 +1235,16 @@ function boot() {
   });
   bind();
   firstRun(applyTokenLink());   // 先吃「免填写链接」里的配置，再决定是否弹首次引导
+  // 边界情况：若本页已打开，再粘贴「免填写链接」只会产生片段变化，
+  // 浏览器不会重新加载文档，boot() 也就不会再跑一次 —— 必须额外监听 hashchange，
+  // 否则用户会以为链接没生效（这是真机验证时踩到的坑）。
+  window.addEventListener('hashchange', async () => {
+    if (!readTokenLink()) return;      // 无关片段（视图锚点等）不处理
+    applyTokenLink();
+    closeModal('settingsModal');       // 若正处于「请填写 Token」引导态，配置已完成就该收起来
+    toast('已通过专属链接自动完成配置');
+    await loadVault(true);
+  });
 }
 
 /** 首次使用引导：loadVault 是异步的，必须等它写完状态再覆盖，否则提示会被冲掉 */
