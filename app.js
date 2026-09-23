@@ -549,6 +549,20 @@ function renderSelBar() {
   $('#selCount').textContent = String(n);
 }
 
+/**
+ * 只把选中态同步到已渲染的卡片上，不重建 grid。
+ * 勾选时整体重渲染会丢滚动位置、打断卡片过渡动画，且是 O(n) DOM 重建。
+ */
+function syncAgentSelection() {
+  $$('#agentGrid [data-acheck]').forEach((chk) => {
+    const on = selectedAgents.has(chk.getAttribute('data-acheck'));
+    chk.checked = on;
+    const card = chk.closest('.card');
+    if (card) card.classList.toggle('selected', on);
+  });
+  renderSelBar();
+}
+
 function openAgentModal(id) {
   editingAgentId = id || null;
   const a = id ? vault.agents.find((x) => x.id === id) : null;
@@ -1054,7 +1068,7 @@ function bind() {
     if (chk) {
       const id = chk.getAttribute('data-acheck');
       if (selectedAgents.has(id)) selectedAgents.delete(id); else selectedAgents.add(id);
-      return renderAgents();
+      return syncAgentSelection();
     }
     if (c) { const a = vault.agents.find((x) => x.id === c.getAttribute('data-acopy')); return copyText(a.systemPrompt || '', '系统提示词已复制'); }
     if (ed) return openAgentModal(ed.getAttribute('data-aedit'));
@@ -1068,8 +1082,8 @@ function bind() {
   });
 
   // 多选工具条
-  $('#selAllBtn').addEventListener('click', () => { visibleAgents().forEach((a) => selectedAgents.add(a.id)); renderAgents(); });
-  $('#selClearBtn').addEventListener('click', () => { selectedAgents.clear(); renderAgents(); });
+  $('#selAllBtn').addEventListener('click', () => { visibleAgents().forEach((a) => selectedAgents.add(a.id)); syncAgentSelection(); });
+  $('#selClearBtn').addEventListener('click', () => { selectedAgents.clear(); syncAgentSelection(); });
   $('#selCopyBtn').addEventListener('click', () => exportSelected('copy'));
   $('#selTxtBtn').addEventListener('click', () => exportSelected('txt'));
   $('#selJsonBtn').addEventListener('click', () => exportSelected('json'));
