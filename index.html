@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PromptVault · AI 提示词库</title>
+<meta name="description" content="AI 提示词 / Agent / 多 Agent 编排的记录与 GitHub 同步工具（纯前端版）" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%236d5cf7'/%3E%3Ctext x='16' y='22' font-family='system-ui,sans-serif' font-size='14' font-weight='700' fill='white' text-anchor='middle'%3EPV%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+<div class="bg-glow" aria-hidden="true">
+  <span class="orb orb-1"></span>
+  <span class="orb orb-2"></span>
+  <span class="orb orb-3"></span>
+</div>
+
+<header class="topbar glass">
+  <div class="brand">
+    <span class="brand-mark">PV</span>
+    <div class="brand-text">
+      <h1>PromptVault</h1>
+      <p>提示词 · Agent · 编排，同步到 GitHub</p>
+    </div>
+  </div>
+
+  <nav class="vtab-group" id="viewTabs">
+    <button class="vtab active" data-view="prompts">💬 提示词</button>
+    <button class="vtab" data-view="agents">🤖 Agents</button>
+    <button class="vtab" data-view="orchestrations">🔗 编排</button>
+  </nav>
+
+  <div class="topbar-right">
+    <button id="syncBtn" class="btn ghost" title="从 GitHub 拉取最新数据">⟳ 拉取</button>
+    <button id="themeBtn" class="btn ghost icon-btn" title="切换主题">🌙</button>
+    <button id="settingsBtn" class="btn ghost icon-btn" title="设置">⚙</button>
+  </div>
+</header>
+
+<main class="container">
+
+  <!-- ============ 提示词视图 ============ -->
+  <section id="view-prompts" class="view">
+    <div class="subhead glass">
+      <div>
+        <h2>提示词库</h2>
+        <p class="subhead-desc">沉淀你与 AI 对话中反复使用的高质量提示词。</p>
+      </div>
+      <div class="subhead-actions">
+        <input id="pSearch" class="input search" type="search" placeholder="搜索标题 / 内容 / 标签…" />
+        <button id="newPromptBtn" class="btn primary">+ 新建提示词</button>
+      </div>
+    </div>
+    <div id="tagFilter" class="tag-filter"></div>
+    <div id="promptGrid" class="grid"></div>
+    <div id="promptEmpty" class="empty hidden">
+      <p class="empty-icon">🗂️</p>
+      <p>还没有提示词，点右上角「新建提示词」开始沉淀。</p>
+    </div>
+  </section>
+
+  <!-- ============ Agents 视图 ============ -->
+  <section id="view-agents" class="view hidden">
+    <div class="subhead glass">
+      <div>
+        <h2>Agents</h2>
+        <p class="subhead-desc">为每个 Agent 定义角色与系统提示词，可多选导出。</p>
+      </div>
+      <div class="subhead-actions">
+        <input id="aSearch" class="input search" type="search" placeholder="搜索 Agent 名称 / 角色…" />
+        <button id="newAgentBtn" class="btn primary">+ 新建 Agent</button>
+      </div>
+    </div>
+
+    <div id="selBar" class="sel-bar glass hidden">
+      <span class="sel-count"><b id="selCount">0</b> 个已选</span>
+      <div class="sel-actions">
+        <button id="selAllBtn" class="btn ghost sm">全选</button>
+        <button id="selClearBtn" class="btn ghost sm">清空</button>
+        <span class="sel-sep"></span>
+        <button id="selCopyBtn" class="btn sm">复制</button>
+        <button id="selTxtBtn" class="btn sm">导出 TXT</button>
+        <button id="selJsonBtn" class="btn sm">导出 JSON</button>
+        <button id="selApiBtn" class="btn sm accent" title="含编排链路，可直接喂给 API">导出 API JSON</button>
+        <button id="selSkillBtn" class="btn sm primary" title="打包为 SKILL.md + agents/*.md 的标准技能包（.skill）">📦 导出 Skill 包</button>
+      </div>
+    </div>
+
+    <div id="agentGrid" class="grid"></div>
+    <div id="agentEmpty" class="empty hidden">
+      <p class="empty-icon">🤖</p>
+      <p>还没有 Agent，先建一个，例如「需求分析师」「代码审查员」。</p>
+    </div>
+  </section>
+
+  <!-- ============ 编排视图 ============ -->
+  <section id="view-orchestrations" class="view hidden">
+    <div class="subhead glass">
+      <div>
+        <h2>多 Agent 编排</h2>
+        <p class="subhead-desc">把多个 Agent 串成一条流水线，记录步骤与任务。</p>
+      </div>
+      <div class="subhead-actions">
+        <button id="newOrchBtn" class="btn primary">+ 新建编排</button>
+      </div>
+    </div>
+    <div id="orchGrid" class="grid"></div>
+    <div id="orchEmpty" class="empty hidden">
+      <p class="empty-icon">🔗</p>
+      <p>还没有编排，把已建好的 Agent 串成链路吧。</p>
+    </div>
+  </section>
+
+</main>
+
+<!-- ============ 提示词弹窗 ============ -->
+<div id="promptModal" class="modal hidden">
+  <div class="modal-card glass">
+    <div class="modal-head">
+      <h3 id="promptModalTitle">新建提示词</h3>
+      <button class="btn ghost icon-btn modal-close" data-close="promptModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <label>标题
+        <input id="p_title" class="input" type="text" placeholder="例如：把会议记录整理成行动项" />
+      </label>
+      <div class="row">
+        <label>分类
+          <input id="p_category" class="input" type="text" placeholder="写作 / 编程 / 分析…" />
+        </label>
+        <label>标签（逗号分隔）
+          <input id="p_tags" class="input" type="text" placeholder="gpt, 复盘" />
+        </label>
+      </div>
+      <label>提示词内容
+        <textarea id="p_content" class="input" rows="10" placeholder="粘贴提示词正文…"></textarea>
+      </label>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" data-close="promptModal">取消</button>
+      <button id="promptSaveBtn" class="btn primary">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Agent 弹窗 ============ -->
+<div id="agentModal" class="modal hidden">
+  <div class="modal-card glass">
+    <div class="modal-head">
+      <h3 id="agentModalTitle">新建 Agent</h3>
+      <button class="btn ghost icon-btn modal-close" data-close="agentModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="row">
+        <label>名称
+          <input id="a_name" class="input" type="text" placeholder="例如：代码审查员" />
+        </label>
+        <label>角色定位
+          <input id="a_role" class="input" type="text" placeholder="例如：资深工程师" />
+        </label>
+      </div>
+      <div class="row">
+        <label>推荐模型
+          <input id="a_model" class="input" type="text" placeholder="例如：gpt-4o / claude-sonnet" />
+        </label>
+        <label>标签（逗号分隔）
+          <input id="a_tags" class="input" type="text" placeholder="coding, review" />
+        </label>
+      </div>
+      <label>职责描述
+        <input id="a_desc" class="input" type="text" placeholder="一句话说明这个 Agent 负责什么" />
+      </label>
+      <label>系统提示词（System Prompt）
+        <textarea id="a_system" class="input" rows="9" placeholder="你是一位…"></textarea>
+      </label>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" data-close="agentModal">取消</button>
+      <button id="agentSaveBtn" class="btn primary">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 编排弹窗 ============ -->
+<div id="orchModal" class="modal hidden">
+  <div class="modal-card glass wide">
+    <div class="modal-head">
+      <h3 id="orchModalTitle">新建编排</h3>
+      <button class="btn ghost icon-btn modal-close" data-close="orchModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="row">
+        <label>编排名称
+          <input id="o_name" class="input" type="text" placeholder="例如：需求→开发→审查 流水线" />
+        </label>
+        <label>说明
+          <input id="o_desc" class="input" type="text" placeholder="一句话说明这条链路做什么" />
+        </label>
+      </div>
+      <label>步骤链路</label>
+      <div id="o_steps" class="steps"></div>
+      <button id="addStepBtn" class="btn ghost sm">+ 添加步骤</button>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" data-close="orchModal">取消</button>
+      <button id="orchSaveBtn" class="btn primary">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Skill 打包弹窗 ============ -->
+<div id="skillModal" class="modal hidden">
+  <div class="modal-card glass">
+    <div class="modal-head">
+      <h3>导出 Skill 包</h3>
+      <button class="btn ghost icon-btn modal-close" data-close="skillModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint">按 skill-creator 规范打包：<code>SKILL.md</code>（frontmatter: name/description）+ <code>agents/*.md</code> + <code>references/*.json</code>，输出为 <code>&lt;name&gt;.skill</code>（zip）。</p>
+      <label>技能包名（kebab-case，小写字母/数字/连字符）
+        <input id="sk_name" class="input" type="text" placeholder="analog-ic-orchestration" />
+      </label>
+      <label>description（触发说明，≤1024 字符，不能含 &lt; &gt;）
+        <textarea id="sk_desc" class="input" rows="3" placeholder="多 Agent 协作编排，用于…"></textarea>
+      </label>
+      <div id="sk_summary" class="settings-status"></div>
+      <div id="sk_files" class="file-preview"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" data-close="skillModal">取消</button>
+      <button id="skSaveBtn" class="btn primary">打包下载</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 设置弹窗 ============ -->
+<div id="settingsModal" class="modal hidden">
+  <div class="modal-card glass">
+    <div class="modal-head">
+      <h3>设置 · GitHub 同步</h3>
+      <button class="btn ghost icon-btn modal-close" data-close="settingsModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint">
+        <strong>本页是纯前端版（GitHub Pages），没有服务端。</strong>
+        Token 只保存在<b>当前浏览器</b>的 localStorage 里，直连 <code>api.github.com</code>，不会提交到任何仓库。
+        换电脑/换浏览器需重新填写；公共电脑上请不要保存 Token。
+      </p>
+      <p class="hint">Token 需要 <code>repo</code> 权限（私有仓库读写）。建议用 Fine-grained Token，仅授权这一个仓库。</p>
+      <label>GitHub Token
+        <input id="s_token" class="input" type="password" placeholder="ghp_… （留空则保留已存 Token）" />
+      </label>
+      <div class="row">
+        <label>数据仓库名
+          <input id="s_repo" class="input" type="text" placeholder="ai-prompts" />
+        </label>
+        <label>Owner（留空=你的账号）
+          <input id="s_owner" class="input" type="text" placeholder="自动" />
+        </label>
+      </div>
+      <p class="hint">数据仓库是<b>独立于本页代码仓库</b>的私有仓库，只用来存 <code>prompts.json</code>。</p>
+      <div class="row">
+        <label>数据文件名
+          <input id="s_file" class="input" type="text" placeholder="prompts.json" />
+        </label>
+        <label>分支
+          <input id="s_branch" class="input" type="text" placeholder="main" />
+        </label>
+      </div>
+      <label class="checkbox-line">
+        <input id="s_private" type="checkbox" checked /> 仓库设为私有
+      </label>
+      <div id="settingsStatus" class="settings-status"></div>
+    </div>
+    <div class="modal-foot">
+      <button id="s_clearBtn" class="btn ghost danger" title="清除本机浏览器保存的 Token 与缓存">清除本机凭据</button>
+      <button id="s_testBtn" class="btn ghost">测试连接</button>
+      <button class="btn ghost" data-close="settingsModal">取消</button>
+      <button id="settingsSaveBtn" class="btn primary">保存并同步</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="./pkg.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>
