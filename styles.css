@@ -328,6 +328,8 @@ label .input { margin-top: 6px; font-weight: 400; }
 .settings-status.ok { color: var(--ok); }
 .settings-status.err { color: var(--danger); }
 .settings-status.warn { color: var(--danger); font-weight: 600; }
+.lbl-hint { font-size: 11.5px; font-weight: 400; color: var(--text-3); }
+.input:disabled { opacity: 0.55; cursor: not-allowed; }
 
 /* ---------- Toast ---------- */
 .toast {

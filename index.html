@@ -247,12 +247,22 @@
         换电脑/换浏览器需重新填写；公共电脑上请不要保存 Token。
       </p>
       <p class="hint">
-        不想每台设备都手填？配置好后点下面的 <b>🔗 免填写链接</b>，把生成的链接存成书签，
-        换设备时打开这一条链接即可自动完成配置（链接里的 Token 放在 <code>#</code> 片段中，不会发给服务器，也不会进仓库）。
+        <b>几个人共用、谁都不想填 Token？</b> 填写下面的<b>代理地址</b>即可：Token 由服务端代持，
+        浏览器里没有任何凭据。配置好后点 <b>🔗 一键链接</b>，把链接发给同组的人 —— 他们打开一次就永久生效。
+      </p>
+      <p class="hint">
+        不想每台设备都手填？配置好后点 <b>🔗 一键链接</b>，把生成的链接存成书签，
+        换设备时打开这一条链接即可自动完成配置（凭据放在 <code>#</code> 片段中，不会发给服务器，也不会进仓库）。
         <b>该链接等价于密码，勿外发、勿截图。</b>
       </p>
-      <p class="hint">Token 需要 <code>repo</code> 权限（私有仓库读写）。建议用 Fine-grained Token，仅授权这一个仓库。</p>
-      <label>GitHub Token
+      <p class="hint">不用代理时才需要 Token，且需要 <code>repo</code> 权限（私有仓库读写）。建议用 Fine-grained Token，仅授权这一个仓库。</p>
+      <label>代理地址 <span class="lbl-hint">（可选；填了就不需要 Token，形如 https://xxx.workers.dev）</span>
+        <input id="s_apiBase" class="input" type="text" placeholder="留空 = 直连 GitHub" />
+      </label>
+      <label>访问码 <span class="lbl-hint">（代理设置的 ACCESS_CODE）</span>
+        <input id="s_accessCode" class="input" type="password" placeholder="留空则用已保存的" />
+      </label>
+      <label>GitHub Token <span class="lbl-hint">（走代理时留空）</span>
         <input id="s_token" class="input" type="password" placeholder="ghp_… （留空则保留已存 Token）" />
       </label>
       <div class="row">
@@ -279,7 +289,7 @@
     </div>
     <div class="modal-foot">
       <button id="s_clearBtn" class="btn ghost danger" title="清除本机浏览器保存的 Token 与缓存">清除本机凭据</button>
-      <button id="s_linkBtn" class="btn ghost" title="生成一条含 Token 的链接，换电脑/换浏览器时打开即自动配置">🔗 免填写链接</button>
+      <button id="s_linkBtn" class="btn ghost" title="生成一条含凭据的链接，发给同组的人或换设备时打开即自动配置">🔗 一键链接</button>
       <button id="s_testBtn" class="btn ghost">测试连接</button>
       <button class="btn ghost" data-close="settingsModal">取消</button>
       <button id="settingsSaveBtn" class="btn primary">保存并同步</button>

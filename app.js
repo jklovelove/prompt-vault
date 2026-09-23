@@ -55,10 +55,15 @@ function cfgDefaults() {
     file: c.file || 'prompts.json',
     branch: c.branch || 'main',
     private: c.private !== false,
+    // 代理模式：填了 apiBase 就由服务端代持 Token，浏览器里不需要任何凭据
+    apiBase: (c.apiBase || '').replace(/\/+$/, ''),
+    accessCode: c.accessCode || '',
   };
 }
 function saveCfg(c) { localStorage.setItem(CFG_KEY, JSON.stringify(c)); }
-function isConfigured(c) { return !!(c && c.token && c.repo); }
+/** 走代理时：浏览器不持有 Token —— 仓库等配置由 Worker 的 /gh/_config 提供，所以有地址即可用 */
+function isProxy(c) { return !!(c && c.apiBase); }
+function isConfigured(c) { return isProxy(c) ? true : !!(c && c.token && c.repo); }
 function maskToken(t) { return !t ? '' : (t.length <= 10 ? '***' : t.slice(0, 7) + '...' + t.slice(-4)); }
 
 // ------------------------------------------------------------
@@ -82,8 +87,11 @@ function readTokenLink() {
     return '';
   };
   const token = pick('t', 'token');
-  if (!token) return null;
-  const inc = { token };
+  const apiBase = pick('p', 'proxy').replace(/\/+$/, '');
+  if (!token && !apiBase) return null;   // 与视图锚点之类的无关片段区分开
+  const inc = {};
+  if (apiBase) inc.apiBase = apiBase; else inc.token = token;
+  const accessCode = pick('c', 'code'); if (accessCode) inc.accessCode = accessCode;
   const owner = pick('o', 'owner');   if (owner)  inc.owner = owner;
   const repo = pick('r', 'repo');     if (repo)   inc.repo = repo;
   const file = pick('f', 'file');     if (file)   inc.file = file;
@@ -91,27 +99,35 @@ function readTokenLink() {
   return inc;
 }
 
-/** 应用链接注入的配置；返回 true 表示本次启动是由「免填写链接」完成的 */
+/** 应用链接注入的配置；返回 true 表示本次启动是由「一键链接」完成的 */
 function applyTokenLink() {
   const inc = readTokenLink();
   if (!inc) return false;
-  saveCfg(Object.assign(cfgDefaults(), inc));
+  const next = Object.assign(cfgDefaults(), inc);
+  if (inc.apiBase) next.token = '';   // 改走代理后，本机不再保留 Token
+  saveCfg(next);
   // 读完立刻把片段从地址栏抹掉，降低截图/复制时带出 Token 的概率
   try { history.replaceState(null, '', location.pathname + location.search); }
   catch (e) { location.hash = ''; }
   return true;
 }
 
-/** 用本机已存配置生成「免填写链接」，供换电脑 / 换浏览器时一次打开 */
+/** 用本机已存配置生成「一键链接」，供换电脑 / 分享给同组的人 */
 function buildAutoLink() {
   const c = cfgDefaults();
   if (!isConfigured(c)) return '';
   const q = new URLSearchParams();
-  q.set('t', c.token);
-  if (c.owner) q.set('o', c.owner);
-  if (c.repo) q.set('r', c.repo);
-  if (c.file && c.file !== 'prompts.json') q.set('f', c.file);
-  if (c.branch && c.branch !== 'main') q.set('b', c.branch);
+  if (isProxy(c)) {
+    // 代理模式：owner/repo/文件名由 Worker 决定，链接只需地址+访问码，尽量短
+    q.set('p', c.apiBase);
+    if (c.accessCode) q.set('c', c.accessCode);
+  } else {
+    q.set('t', c.token);
+    if (c.owner) q.set('o', c.owner);
+    if (c.repo) q.set('r', c.repo);
+    if (c.file && c.file !== 'prompts.json') q.set('f', c.file);
+    if (c.branch && c.branch !== 'main') q.set('b', c.branch);
+  }
   return location.origin + location.pathname + '#' + q.toString();
 }
 
@@ -127,10 +143,21 @@ function writeCache(v) {
   try { localStorage.setItem(CACHE_KEY, JSON.stringify(normalizeVault(v))); } catch (e) { /* 配额满则忽略 */ }
 }
 
+/** 请求基址：代理模式指向 Worker 的 /gh 前缀，否则直连 GitHub */
+function ghBase() {
+  const c = cfgDefaults();
+  return isProxy(c) ? c.apiBase + '/gh' : 'https://api.github.com';
+}
+
 function ghHeaders(extra) {
   const c = cfgDefaults();
   const h = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
-  if (c.token) h.Authorization = 'Bearer ' + c.token;
+  if (isProxy(c)) {
+    // 代理模式下不带 Authorization：Token 在服务端，浏览器里没有
+    if (c.accessCode) h['X-Access-Code'] = c.accessCode;
+  } else if (c.token) {
+    h.Authorization = 'Bearer ' + c.token;
+  }
   return Object.assign(h, extra || {});
 }
 
@@ -165,23 +192,41 @@ function b64decodeUtf8(b64) {
 }
 
 async function ghGetUser() {
-  return ghJson('https://api.github.com/user', { headers: ghHeaders() });
+  return ghJson(ghBase() + '/user', { headers: ghHeaders() });
+}
+
+/** 代理模式：owner/repo/文件名由 Worker 决定（它被钉死在单个仓库上），用户无需知道任何配置 */
+async function ghProxyConfig() {
+  const c = cfgDefaults();
+  if (!isProxy(c)) return c;
+  const r = await ghJson(c.apiBase + '/gh/_config', { headers: ghHeaders() });
+  const next = Object.assign({}, c, {
+    owner: r.owner || c.owner,
+    repo: r.repo || c.repo,
+    file: r.file || c.file,
+    branch: r.branch || c.branch,
+  });
+  saveCfg(next);
+  return next;
 }
 
 async function ghEnsureRepo() {
-  const c = cfgDefaults();
+  const c = await ghProxyConfig();
   if (!c.owner) {
     const u = await ghGetUser();
     c.owner = u.login;
     saveCfg(c);
   }
-  const url = `https://api.github.com/repos/${c.owner}/${c.repo}`;
+  const url = ghBase() + `/repos/${c.owner}/${c.repo}`;
   try {
     const repo = await ghJson(url, { headers: ghHeaders() });
     return { repo, created: false };
   } catch (e) {
     if (e.status !== 404) throw e;
-    const repo = await ghJson('https://api.github.com/user/repos', {
+    if (isProxy(c)) {
+      throw new Error('代理模式不代建仓库：请把 Worker 的 OWNER / REPO 指向已存在的仓库');
+    }
+    const repo = await ghJson(ghBase() + '/user/repos', {
       method: 'POST',
       headers: ghHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
@@ -195,8 +240,8 @@ async function ghEnsureRepo() {
 }
 
 async function ghReadFile() {
-  const c = cfgDefaults();
-  const url = `https://api.github.com/repos/${c.owner}/${c.repo}/contents/` +
+  const c = await ghProxyConfig();
+  const url = ghBase() + `/repos/${c.owner}/${c.repo}/contents/` +
     encodeURIComponent(c.file) + `?ref=${encodeURIComponent(c.branch)}`;
   try {
     const d = await ghJson(url, { headers: ghHeaders() });
@@ -214,8 +259,8 @@ async function ghReadFile() {
 }
 
 async function ghWriteFile(vault, sha, message) {
-  const c = cfgDefaults();
-  const url = `https://api.github.com/repos/${c.owner}/${c.repo}/contents/` + encodeURIComponent(c.file);
+  const c = await ghProxyConfig();
+  const url = ghBase() + `/repos/${c.owner}/${c.repo}/contents/` + encodeURIComponent(c.file);
   const body = {
     message: message || 'PromptVault sync ' + new Date().toISOString(),
     content: b64encodeUtf8(JSON.stringify(vault, null, 2)),
@@ -268,11 +313,14 @@ function localConfigGet() {
   return {
     configured: isConfigured(c), owner: c.owner, repo: c.repo, file: c.file,
     branch: c.branch, private: c.private, hasToken: !!c.token, tokenMasked: maskToken(c.token),
+    isProxy: isProxy(c), apiBase: c.apiBase, hasAccessCode: !!c.accessCode,
   };
 }
 
 async function localConfigPost(body) {
   const c = Object.assign({}, cfgDefaults());
+  if (typeof body.apiBase === 'string') c.apiBase = body.apiBase.trim().replace(/\/+$/, '');
+  if (typeof body.accessCode === 'string') c.accessCode = body.accessCode.trim();
   if (typeof body.token === 'string' && body.token.trim()) c.token = body.token.trim();
   if (typeof body.owner === 'string') c.owner = body.owner.trim();
   if (typeof body.repo === 'string') c.repo = body.repo.trim();
@@ -280,6 +328,27 @@ async function localConfigPost(body) {
   if (typeof body.branch === 'string') c.branch = body.branch.trim() || 'main';
   if (typeof body.private === 'boolean') c.private = body.private;
   saveCfg(c);
+
+  if (isProxy(c)) {
+    if (!c.repo) c.repo = '（待代理返回）';
+    saveCfg(c);
+    try {
+      const filled = await ghProxyConfig();   // owner/repo/文件名以 Worker 为准
+      const user = await ghGetUser();
+      await ghEnsureRepo();
+      const remote = await ghReadFile();
+      if (!remote.exists) {
+        await ghWriteFile({ version: 2, prompts: [], agents: [], orchestrations: [] }, null, 'chore: init PromptVault vault');
+      }
+      return {
+        ok: true, user: user.login, repo: filled.owner + '/' + filled.repo, created: false, configured: true,
+        owner: filled.owner, repoName: filled.repo, file: filled.file, branch: filled.branch,
+        tokenMasked: '(由代理服务端代持)', proxy: true,
+      };
+    } catch (e) {
+      throw new Error('代理连接失败: ' + e.message);
+    }
+  }
 
   if (!c.token || !c.repo) throw new Error('需要提供 GitHub Token 和仓库名');
   try {
@@ -301,12 +370,14 @@ async function localConfigPost(body) {
 
 async function localGithubTest() {
   const c = cfgDefaults();
-  if (!isConfigured(c)) throw new Error('尚未配置 Token 与仓库');
+  if (!isConfigured(c)) throw new Error(isProxy(c) ? '代理地址无效' : '尚未配置 Token 与仓库');
   const user = await ghGetUser();
   await ghEnsureRepo();
   const remote = await ghReadFile();
+  const now = cfgDefaults();
   return {
-    ok: true, user: user.login, repo: `${cfgDefaults().owner}/${c.repo}`, file: c.file,
+    ok: true, user: user.login, repo: `${now.owner}/${now.repo}`, file: now.file,
+    proxy: isProxy(c),
     fileExists: remote.exists,
     counts: {
       prompts: remote.vault.prompts.length,
@@ -993,11 +1064,24 @@ async function openSettings() {
   try {
     const c = await api('/api/config');
     $('#s_token').value = '';
-    $('#s_token').placeholder = c.hasToken ? `已保存 ${c.tokenMasked}（留空则不变）` : 'ghp_…';
-    $('#s_owner').value = c.owner || '';
-    $('#s_repo').value = c.repo || '';
-    $('#s_file').value = c.file || 'prompts.json';
-    $('#s_branch').value = c.branch || 'main';
+    $('#s_apiBase').value = c.apiBase || '';
+    $('#s_accessCode').value = '';
+    $('#s_accessCode').placeholder = c.hasAccessCode ? '已保存（留空则不变）' : '留空 = 代理未设访问码';
+    if (c.isProxy) {
+      // 代理模式：owner/repo/文件名/分支由 Worker 决定，本地不让改，免得和钉死的仓库对不上
+      $('#s_token').placeholder = '走代理中，无需 Token';
+      $('#s_owner').value = c.owner || '';
+      $('#s_repo').value = c.repo || '';
+      $('#s_file').value = c.file || '';
+      $('#s_branch').value = c.branch || '';
+    } else {
+      $('#s_token').placeholder = c.hasToken ? `已保存 ${c.tokenMasked}（留空则不变）` : 'ghp_…';
+      $('#s_owner').value = c.owner || '';
+      $('#s_repo').value = c.repo || '';
+      $('#s_file').value = c.file || 'prompts.json';
+      $('#s_branch').value = c.branch || 'main';
+    }
+    ['s_owner', 's_repo', 's_file', 's_branch'].forEach((id) => { $('#' + id).disabled = !!c.isProxy; });
     $('#s_private').checked = c.private !== false;
     setSettingsStatus('');
   } catch (e) { /* ignore */ }
@@ -1005,21 +1089,24 @@ async function openSettings() {
 }
 
 async function submitSettings() {
+  const apiBase = $('#s_apiBase').value.trim();
   const body = {
+    apiBase,
+    accessCode: $('#s_accessCode').value.trim(),
     token: $('#s_token').value.trim(),
-    owner: $('#s_owner').value.trim(),
-    repo: $('#s_repo').value.trim(),
-    file: $('#s_file').value.trim(),
-    branch: $('#s_branch').value.trim(),
+    owner: apiBase ? '' : $('#s_owner').value.trim(),
+    repo: apiBase ? '' : $('#s_repo').value.trim(),
+    file: apiBase ? '' : $('#s_file').value.trim(),
+    branch: apiBase ? '' : $('#s_branch').value.trim(),
     private: $('#s_private').checked,
   };
-  if (!body.repo) return toast('请填写仓库名', true);
-  setSettingsStatus('正在校验并创建/连接仓库…');
+  if (!body.repo && !apiBase) return toast('请填写仓库名（或填代理地址）', true);
+  setSettingsStatus(apiBase ? '正在通过代理校验…' : '正在校验并创建/连接仓库…');
   $('#settingsSaveBtn').disabled = true;
   try {
     const r = await api('/api/config', { method: 'POST', body });
-    setSettingsStatus(`✅ 已连接 ${r.repo}${r.created ? '（已新建仓库）' : ''}`, 'ok');
-    toast('GitHub 已配置');
+    setSettingsStatus(`✅ 已连接 ${r.repo}${r.proxy ? '（代理模式，浏览器不含凭据）' : ''}${r.created ? '（已新建仓库）' : ''}`, 'ok');
+    toast(r.proxy ? '已通过代理连接' : 'GitHub 已配置');
     await loadVault(true);
     setTimeout(() => closeModal('settingsModal'), 500);
   } catch (e) {
@@ -1029,12 +1116,17 @@ async function submitSettings() {
   }
 }
 
-/** 生成并复制「免填写链接」：换电脑时打开这一条链接即可，无需再粘贴 Token */
+/** 生成并复制「一键链接」：存书签、或发给同组的人，打开一次即可用 */
 async function showAutoLink() {
   const link = buildAutoLink();
-  if (!link) return toast('请先保存 Token 与仓库名，再生成链接', true);
-  await copyText(link, '免填写链接已复制');
-  setSettingsStatus('⚠️ 这条链接等价于你的 Token：只存为书签，勿外发、勿截图、勿贴进聊天。', 'warn');
+  if (!link) return toast('请先保存配置，再生成链接', true);
+  await copyText(link, '一键链接已复制');
+  setSettingsStatus(
+    isProxy(cfgDefaults())
+      ? '✅ 代理模式：这条链接里只有代理地址和访问码，不含 GitHub Token。直接发给同组的人即可。'
+      : '⚠️ 这条链接等价于你的 Token：只给可信的人，勿公开、勿贴进公开场合。',
+    isProxy(cfgDefaults()) ? 'ok' : 'warn'
+  );
 }
 
 async function testConnection() {
@@ -1258,8 +1350,9 @@ async function firstRun(injected) {
   setSyncState('首次使用 · 请先配置', 'warn');
   await openSettings();            // openSettings 内部会清空 settingsStatus，必须等它结束
   setSettingsStatus(
-    '纯前端版：请填入 GitHub Token 与数据仓库名。Token 只保存在本机浏览器，不会上传到任何服务器。' +
-    '若你已生成过「免填写链接」，直接打开那条链接即可跳到这一步。'
+    '两种用法：① 填 GitHub Token + 仓库名（Token 只存本机浏览器，不上传任何服务器）；' +
+    '② 填「代理地址」——Token 由服务端代持，你什么都不用填，几个人共用就选这个。' +
+    '若你已有一条「一键链接」，直接打开即可跳过这一步。'
   );
 }
 
