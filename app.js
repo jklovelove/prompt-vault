@@ -61,6 +61,60 @@ function saveCfg(c) { localStorage.setItem(CFG_KEY, JSON.stringify(c)); }
 function isConfigured(c) { return !!(c && c.token && c.repo); }
 function maskToken(t) { return !t ? '' : (t.length <= 10 ? '***' : t.slice(0, 7) + '...' + t.slice(-4)); }
 
+// ------------------------------------------------------------
+//  「免填写链接」：把配置放进 URL 片段，换设备时打开一次即自动完成配置
+//
+//  为什么放在片段(#)而不是写进代码：
+//    · 片段不会发送给服务器、不进 Referer、不被搜索引擎收录；
+//    · 更关键的是——写进代码仓库等于公开泄露。本页代码仓库是 PUBLIC，
+//      GitHub 的 secret scanning 会自动「检测并吊销」公共仓库里的 GitHub 令牌，
+//      所以内置 Token 不但不安全，而且会直接失效。
+//  代价：这条链接本身等价于密码（只存书签，别外发/截图）。
+//  建议搭配「仅授权这一个数据仓库」的 fine-grained token，把影响面压到最小。
+// ------------------------------------------------------------
+function readTokenLink() {
+  const raw = String(location.hash || '').replace(/^#/, '');
+  if (!raw) return null;
+  let q;
+  try { q = new URLSearchParams(raw); } catch (e) { return null; }
+  const pick = (...keys) => {
+    for (const k of keys) { const v = q.get(k); if (v) return v.trim(); }
+    return '';
+  };
+  const token = pick('t', 'token');
+  if (!token) return null;
+  const inc = { token };
+  const owner = pick('o', 'owner');   if (owner)  inc.owner = owner;
+  const repo = pick('r', 'repo');     if (repo)   inc.repo = repo;
+  const file = pick('f', 'file');     if (file)   inc.file = file;
+  const branch = pick('b', 'branch'); if (branch) inc.branch = branch;
+  return inc;
+}
+
+/** 应用链接注入的配置；返回 true 表示本次启动是由「免填写链接」完成的 */
+function applyTokenLink() {
+  const inc = readTokenLink();
+  if (!inc) return false;
+  saveCfg(Object.assign(cfgDefaults(), inc));
+  // 读完立刻把片段从地址栏抹掉，降低截图/复制时带出 Token 的概率
+  try { history.replaceState(null, '', location.pathname + location.search); }
+  catch (e) { location.hash = ''; }
+  return true;
+}
+
+/** 用本机已存配置生成「免填写链接」，供换电脑 / 换浏览器时一次打开 */
+function buildAutoLink() {
+  const c = cfgDefaults();
+  if (!isConfigured(c)) return '';
+  const q = new URLSearchParams();
+  q.set('t', c.token);
+  if (c.owner) q.set('o', c.owner);
+  if (c.repo) q.set('r', c.repo);
+  if (c.file && c.file !== 'prompts.json') q.set('f', c.file);
+  if (c.branch && c.branch !== 'main') q.set('b', c.branch);
+  return location.origin + location.pathname + '#' + q.toString();
+}
+
 function readCache() {
   try {
     const v = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
@@ -975,6 +1029,14 @@ async function submitSettings() {
   }
 }
 
+/** 生成并复制「免填写链接」：换电脑时打开这一条链接即可，无需再粘贴 Token */
+async function showAutoLink() {
+  const link = buildAutoLink();
+  if (!link) return toast('请先保存 Token 与仓库名，再生成链接', true);
+  await copyText(link, '免填写链接已复制');
+  setSettingsStatus('⚠️ 这条链接等价于你的 Token：只存为书签，勿外发、勿截图、勿贴进聊天。', 'warn');
+}
+
 async function testConnection() {
   setSettingsStatus('正在测试…');
   try {
@@ -1022,6 +1084,7 @@ function bind() {
   $('#settingsBtn').addEventListener('click', openSettings);
   $('#settingsSaveBtn').addEventListener('click', submitSettings);
   $('#s_testBtn').addEventListener('click', testConnection);
+  $('#s_linkBtn').addEventListener('click', showAutoLink);
   $('#s_clearBtn').addEventListener('click', clearCredentials);
 
   // 搜索
@@ -1171,12 +1234,13 @@ function boot() {
     if (currentThemeMode() === 'system') applyTheme('system');
   });
   bind();
-  firstRun();
+  firstRun(applyTokenLink());   // 先吃「免填写链接」里的配置，再决定是否弹首次引导
 }
 
 /** 首次使用引导：loadVault 是异步的，必须等它写完状态再覆盖，否则提示会被冲掉 */
-async function firstRun() {
+async function firstRun(injected) {
   if (isConfigured(cfgDefaults())) {
+    if (injected) toast('已通过专属链接自动完成配置');
     await loadVault(true);
     return;
   }
@@ -1184,7 +1248,8 @@ async function firstRun() {
   setSyncState('首次使用 · 请先配置', 'warn');
   await openSettings();            // openSettings 内部会清空 settingsStatus，必须等它结束
   setSettingsStatus(
-    '纯前端版：请填入 GitHub Token 与数据仓库名。Token 只保存在本机浏览器，不会上传到任何服务器。'
+    '纯前端版：请填入 GitHub Token 与数据仓库名。Token 只保存在本机浏览器，不会上传到任何服务器。' +
+    '若你已生成过「免填写链接」，直接打开那条链接即可跳到这一步。'
   );
 }
 

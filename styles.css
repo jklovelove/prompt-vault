@@ -327,6 +327,7 @@ label .input { margin-top: 6px; font-weight: 400; }
 .settings-status { font-size: 12.5px; margin-top: 6px; min-height: 18px; }
 .settings-status.ok { color: var(--ok); }
 .settings-status.err { color: var(--danger); }
+.settings-status.warn { color: var(--danger); font-weight: 600; }
 
 /* ---------- Toast ---------- */
 .toast {
