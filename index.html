@@ -25,6 +25,7 @@
   </div>
 
   <nav class="vtab-group" id="viewTabs">
+    <button class="vtab" data-view="capture">✨ 捕捉</button>
     <button class="vtab active" data-view="prompts">💬 提示词</button>
     <button class="vtab" data-view="agents">🤖 Agents</button>
     <button class="vtab" data-view="orchestrations">🔗 编排</button>
@@ -39,6 +40,52 @@
 </header>
 
 <main class="container">
+
+  <!-- ============ 捕捉视图 ============ -->
+  <section id="view-capture" class="view hidden">
+    <div class="subhead glass">
+      <div>
+        <h2>捕捉</h2>
+        <p class="subhead-desc">把文字或截图粘进来，自动生成提示词 + Agent + 编排链路。</p>
+      </div>
+      <div class="subhead-actions">
+        <label class="inline-field" title="自动：配了 LLM Key 就用大模型，没配则自动走离线生成">
+          <span class="lbl-hint">生成方式</span>
+          <select id="cap_mode" class="input">
+            <option value="auto">🪄 自动</option>
+            <option value="offline">⚙ 离线生成</option>
+          </select>
+        </label>
+      </div>
+    </div>
+
+    <div id="capDrop" class="cap-drop glass">
+      <div class="cap-drop-head">
+        <span class="cap-drop-icon">📥</span>
+        <div>
+          <p class="cap-drop-title">在这里按 Ctrl / ⌘ + V 粘贴</p>
+          <p class="cap-drop-sub">支持文字和截图；也可以把图片文件拖进来，或点下面的「选择图片」。</p>
+        </div>
+      </div>
+
+      <textarea id="cap_text" class="input cap-text" rows="9"
+        placeholder="粘贴提示词原文、需求描述、聊天记录…都可以，内容越完整生成得越准"></textarea>
+
+      <div id="cap_thumbs" class="cap-thumbs hidden"></div>
+
+      <div class="cap-tools">
+        <button id="cap_fileBtn" class="btn ghost sm">📎 选择图片</button>
+        <span id="cap_meta" class="cap-meta">0 字 · 0 张图</span>
+        <button id="cap_clearBtn" class="btn ghost sm">清空</button>
+      </div>
+      <input id="cap_file" type="file" accept="image/*" multiple hidden />
+    </div>
+
+    <div class="cap-go">
+      <button id="cap_genBtn" class="btn primary lg">🪄 自动生成提示词 + Agent + 编排</button>
+      <div id="cap_status" class="settings-status"></div>
+    </div>
+  </section>
 
   <!-- ============ 提示词视图 ============ -->
   <section id="view-prompts" class="view">
@@ -113,6 +160,22 @@
   </section>
 
 </main>
+
+<!-- ============ 捕捉结果弹窗 ============ -->
+<div id="capModal" class="modal hidden">
+  <div class="modal-card glass wide">
+    <div class="modal-head">
+      <h3>生成结果</h3>
+      <button class="btn ghost icon-btn modal-close" data-close="capModal">✕</button>
+    </div>
+    <div class="modal-body" id="capResult"></div>
+    <div class="modal-foot">
+      <button class="btn ghost" data-close="capModal">取消</button>
+      <button id="capCopyBtn" class="btn ghost">📋 复制全部</button>
+      <button id="capSaveBtn" class="btn primary">保存到保险库</button>
+    </div>
+  </div>
+</div>
 
 <!-- ============ 提示词弹窗 ============ -->
 <div id="promptModal" class="modal hidden">
@@ -286,6 +349,25 @@
       <label class="checkbox-line">
         <input id="s_private" type="checkbox" checked /> 仓库设为私有
       </label>
+
+      <hr class="sep" />
+      <p class="hint">
+        <b>捕捉页的 AI 生成（可选）</b>：填了下面的 Key，「✨ 捕捉」就会用大模型把素材提炼成
+        提示词 / Agent / 编排；留空或调用失败则自动回退到本地离线生成（不需要任何 Key）。
+        Key 只存在本机浏览器，不会上传、不会写进仓库。
+      </p>
+      <label>LLM 接口地址 <span class="lbl-hint">（OpenAI 兼容，如 https://api.deepseek.com/v1）</span>
+        <input id="s_llmBase" class="input" type="text" placeholder="https://api.deepseek.com/v1" />
+      </label>
+      <div class="row">
+        <label>API Key
+          <input id="s_llmKey" class="input" type="password" placeholder="留空 = 只用离线生成" />
+        </label>
+        <label>模型名
+          <input id="s_llmModel" class="input" type="text" placeholder="deepseek-chat" />
+        </label>
+      </div>
+
       <div id="settingsStatus" class="settings-status"></div>
     </div>
     <div class="modal-foot">

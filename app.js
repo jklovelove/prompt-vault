@@ -61,6 +61,10 @@ function cfgDefaults() {
     // 代理模式：填了 apiBase 就由服务端代持 Token，浏览器里不需要任何凭据
     apiBase: (c.apiBase || '').replace(/\/+$/, ''),
     accessCode: c.accessCode || '',
+    // 捕捉页的 AI 生成（可选）：OpenAI 兼容接口。三项齐全才走大模型，否则用离线启发式。
+    llmBase: (c.llmBase || '').replace(/\/+$/, ''),
+    llmKey: c.llmKey || '',
+    llmModel: c.llmModel || '',
   };
 }
 function saveCfg(c) { localStorage.setItem(CFG_KEY, JSON.stringify(c)); }
@@ -341,6 +345,9 @@ function localConfigGet() {
     configured: isConfigured(c), owner: c.owner, repo: c.repo, file: c.file,
     branch: c.branch, private: c.private, hasToken: !!c.token, tokenMasked: maskToken(c.token),
     isProxy: isProxy(c), apiBase: c.apiBase, hasAccessCode: !!c.accessCode,
+    // LLM Key 只回「有没有」，不回明文
+    llmReady: !!(c.llmBase && c.llmKey && c.llmModel),
+    llmBase: c.llmBase, llmModel: c.llmModel, hasLlmKey: !!c.llmKey,
   };
 }
 
@@ -354,6 +361,10 @@ async function localConfigPost(body) {
   if (typeof body.file === 'string') c.file = body.file.trim() || 'prompts.json';
   if (typeof body.branch === 'string') c.branch = body.branch.trim() || 'main';
   if (typeof body.private === 'boolean') c.private = body.private;
+  // 捕捉页的 LLM 配置：key 为空表示「不改动」，避免每次保存都要重填
+  if (typeof body.llmBase === 'string') c.llmBase = body.llmBase.trim().replace(/\/+$/, '');
+  if (typeof body.llmModel === 'string') c.llmModel = body.llmModel.trim();
+  if (typeof body.llmKey === 'string' && body.llmKey.trim()) c.llmKey = body.llmKey.trim();
   saveCfg(c);
 
   if (isProxy(c)) {
@@ -586,16 +597,708 @@ async function saveVault(message) {
       setSyncState('仅保存本地', 'warn');
       toast(r.warning || r.message || '已保存到本地', r.warning ? true : false);
     }
+    return r;                       // 调用方可据此决定收尾提示（例如捕捉页要报告生成了几条）
   } catch (e) {
     toast('保存失败: ' + e.message, true);
+    return null;
   }
+}
+
+// ---------------- 捕捉：粘贴 / 拖拽 → 提示词 + Agent + 编排 ----------------
+
+const CAP_MAX_EDGE = 1024;      // 截图长边上限：原图动辄几 MB，塞进 JSON 会让每次同步都很重
+const CAP_MAX_IMAGES = 6;
+let capImages = [];             // [{ id, name, dataUrl, w, h, srcW, srcH }]
+let capResult = null;           // 最近一次生成结果（保存前）
+let capBusy = false;
+
+function setCapStatus(text, cls) {
+  const el = $('#cap_status');
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = 'settings-status' + (cls ? ' ' + cls : '');
+}
+
+function capMeta() {
+  const el = $('#cap_meta');
+  if (!el) return;
+  const box = $('#cap_text');
+  const n = box ? (box.value || '').trim().length : 0;
+  el.textContent = n + ' 字 · ' + capImages.length + ' 张图';
+}
+
+/** LLM 三项齐全才算「配好了」，缺一项就安静走离线 */
+function llmReady() {
+  const c = cfgDefaults();
+  return !!(c.llmBase && c.llmKey && c.llmModel);
+}
+
+/**
+ * 把图片压到长边 ≤ CAP_MAX_EDGE 的 JPEG。
+ * PNG 透明区域转 JPEG 会发黑，所以先铺白底。
+ */
+function downscaleImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const w0 = img.naturalWidth || img.width;
+      const h0 = img.naturalHeight || img.height;
+      const scale = Math.min(1, CAP_MAX_EDGE / Math.max(w0, h0));
+      const w = Math.max(1, Math.round(w0 * scale));
+      const h = Math.max(1, Math.round(h0 * scale));
+      const cv = document.createElement('canvas');
+      cv.width = w; cv.height = h;
+      const ctx = cv.getContext('2d');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      resolve({ dataUrl: cv.toDataURL('image/jpeg', 0.82), w, h, srcW: w0, srcH: h0 });
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片解码失败')); };
+    img.src = url;
+  });
+}
+
+async function capAddFiles(files) {
+  const list = Array.from(files || []).filter((f) => /^image\//.test(f.type || ''));
+  if (!list.length) return;
+  const room = CAP_MAX_IMAGES - capImages.length;
+  if (room <= 0) return toast('最多同时放 ' + CAP_MAX_IMAGES + ' 张图', true);
+  for (const f of list.slice(0, room)) {
+    try {
+      const d = await downscaleImage(f);
+      capImages.push(Object.assign({ id: uid(), name: f.name || '截图' }, d));
+    } catch (e) {
+      toast('图片处理失败：' + e.message, true);
+    }
+  }
+  renderCapThumbs();
+}
+
+function renderCapThumbs() {
+  const wrap = $('#cap_thumbs');
+  if (!wrap) return;
+  wrap.classList.toggle('hidden', capImages.length === 0);
+  wrap.innerHTML = capImages.map((im) => `
+    <figure class="cap-thumb">
+      <img src="${im.dataUrl}" alt="${escapeHtml(im.name)}" />
+      <button class="cap-thumb-x" data-capdel="${im.id}" title="移除这张">✕</button>
+      <figcaption>${im.w}×${im.h}${im.srcW > im.w ? ' · 已压缩' : ''}</figcaption>
+    </figure>`).join('');
+  capMeta();
+}
+
+/** 把文字插入光标处（而不是粗暴覆盖），这样「先打字再粘一段」也顺手 */
+function capInsertText(text) {
+  const box = $('#cap_text');
+  if (!box) return;
+  const s = box.selectionStart == null ? box.value.length : box.selectionStart;
+  const e = box.selectionEnd == null ? s : box.selectionEnd;
+  const glue = box.value && !/\n$/.test(box.value.slice(0, s)) ? '\n' : '';
+  const ins = glue + text;
+  box.value = box.value.slice(0, s) + ins + box.value.slice(e);
+  box.selectionStart = box.selectionEnd = s + ins.length;
+  capMeta();
+}
+
+/**
+ * 整个页面上按 Ctrl/⌘+V 都能收：粘图直接进缩略图，粘文字进输入框。
+ * 只在捕捉视图激活、且结果弹窗未打开时接管，避免干扰别处粘贴。
+ */
+function capOnPaste(ev) {
+  if (currentView !== 'capture') return;
+  const modal = $('#capModal');
+  if (modal && !modal.classList.contains('hidden')) return;
+  const dt = ev.clipboardData;
+  if (!dt) return;
+
+  const imgs = Array.from(dt.items || [])
+    .filter((it) => it.kind === 'file' && /^image\//.test(it.type || ''))
+    .map((it) => it.getAsFile())
+    .filter(Boolean);
+  if (imgs.length) {
+    ev.preventDefault();
+    capAddFiles(imgs);
+    toast('已加入 ' + imgs.length + ' 张图');
+    return;
+  }
+
+  // 焦点已经在输入框里：交给浏览器默认插入，不要重复处理
+  if (ev.target === $('#cap_text')) return;
+  const text = dt.getData('text/plain');
+  if (text) { ev.preventDefault(); capInsertText(text); }
+}
+
+function bindCapDrop() {
+  const zone = $('#capDrop');
+  if (!zone) return;
+  const stop = (e) => { e.preventDefault(); e.stopPropagation(); };
+  ['dragenter', 'dragover'].forEach((n) => zone.addEventListener(n, (e) => { stop(e); zone.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach((n) => zone.addEventListener(n, (e) => { stop(e); zone.classList.remove('over'); }));
+  zone.addEventListener('drop', (e) => {
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files.length) return capAddFiles(files);
+    const text = e.dataTransfer && e.dataTransfer.getData('text/plain');
+    if (text) capInsertText(text);
+  });
+}
+
+// ---- Agent 模板库 ----
+// 角色分工参考 AutoGen 的 Assistant/UserProxy 协作、SWE-agent 的「定位→修复→验证」、
+// OpenHands 的「规划→执行→复盘」。phase：1 规划 / 2 执行 / 3 把关，用于排出合理链路。
+const CAP_AGENT_LIB = [
+  {
+    key: 'planner', phase: 1, name: '规划者', role: '需求拆解与方案设计',
+    model: 'gpt-4o', temperature: 0.3, tags: ['规划', '拆解'],
+    description: '把模糊需求拆成可独立验证的步骤，明确边界与验收标准。',
+    hits: ['规划', '方案', '设计', '架构', '拆解', '步骤', '流程', '计划', '怎么做', '如何实现', 'plan', 'design'],
+    sys: [
+      '你是任务规划专家。接到需求后：',
+      '1) 用自己的话复述目标与边界，明确指出其中含糊或互相矛盾之处；',
+      '2) 拆成 3~7 个可独立验收的步骤，标明依赖顺序；',
+      '3) 每步写清「输入 / 产出 / 验收标准」；',
+      '4) 单独列出风险点与必须由人确认的决策。',
+      '只输出规划，不要写实现细节或代码。',
+    ].join('\n'),
+  },
+  {
+    key: 'researcher', phase: 2, name: '检索员', role: '资料搜集与事实核对',
+    model: 'gpt-4o', temperature: 0.2, tags: ['检索', '调研'],
+    description: '围绕任务搜集必要背景资料，标注来源与不确定性。',
+    hits: ['检索', '搜集', '调研', '资料', '文献', '查一下', '对比', '竞品', '市场', 'research', 'survey'],
+    sys: [
+      '你是资料调研员。要求：',
+      '1) 先列出「要回答这个问题，必须知道哪几件事」；',
+      '2) 逐条给出你掌握的信息，并标注来源类型（官方文档 / 论文 / 行业实践 / 推测）；',
+      '3) 明确区分「确定的事实」与「你的推断」，推断必须写出依据；',
+      '4) 找不到可靠信息的，直接说「未找到」，不要编造。',
+    ].join('\n'),
+  },
+  {
+    key: 'analyst', phase: 2, name: '分析师', role: '数据分析与洞察提炼',
+    model: 'gpt-4o', temperature: 0.3, tags: ['分析', '数据'],
+    description: '从数据中提炼结论，给出量化依据与置信度。',
+    hits: ['分析', '数据', '指标', '统计', '趋势', '报表', '洞察', '估值', '财报', 'analysis', 'metric'],
+    sys: [
+      '你是数据分析师。要求：',
+      '1) 先说清数据口径与样本范围，指出缺失的关键字段；',
+      '2) 给出分析结论，每条结论后附支撑数据；',
+      '3) 对每个结论标注置信度（高/中/低）及可能推翻它的条件；',
+      '4) 不要用「显著」「大幅」这类无量化依据的词。',
+    ].join('\n'),
+  },
+  {
+    key: 'coder', phase: 2, name: '开发工程师', role: '编码实现与调试',
+    model: 'gpt-4o', temperature: 0.2, tags: ['编程', '实现'],
+    description: '按规划实现代码，附带可运行的验证方式。',
+    hits: ['代码', '函数', '接口', '实现', '开发', '重构', '报错', 'bug', '脚本', '数据库', '部署', 'api', 'python', 'javascript', 'sql'],
+    sys: [
+      '你是资深开发工程师。要求：',
+      '1) 先说明改动思路与影响范围，再给代码；',
+      '2) 代码需可直接运行，关键处写注释解释「为什么」而非「做了什么」；',
+      '3) 说明边界情况与错误处理，不要吞掉异常；',
+      '4) 最后给出验证步骤（怎么跑、预期看到什么）。',
+    ].join('\n'),
+  },
+  {
+    key: 'writer', phase: 2, name: '写作助手', role: '内容撰写与改写',
+    model: 'gpt-4o', temperature: 0.7, tags: ['写作', '文案'],
+    description: '按目标读者与用途撰写或改写内容。',
+    hits: ['写', '文案', '文章', '标题', '润色', '总结', '摘要', '报告', '邮件', '故事', '演讲稿', '朋友圈', '报告', 'write', 'draft'],
+    sys: [
+      '你是中文写作顾问。要求：',
+      '1) 动笔前先确定读者是谁、看完要做什么，一句话说明；',
+      '2) 结构清晰，每段一个意思，不用空洞的排比和套话；',
+      '3) 用具体事实和数字代替形容词；',
+      '4) 交付完整成稿，不要只给提纲；需要保留的地方用【】标出待确认信息。',
+    ].join('\n'),
+  },
+  {
+    key: 'translator', phase: 2, name: '翻译', role: '跨语言转换与本地化',
+    model: 'gpt-4o', temperature: 0.3, tags: ['翻译', '本地化'],
+    description: '按目标语言习惯翻译，而非逐字直译。',
+    hits: ['翻译', '中译英', '英译中', '本地化', 'translate', 'localization'],
+    sys: [
+      '你是专业译者。要求：',
+      '1) 先判断文本类型（技术文档 / 营销文案 / 日常对话），据此选择语气；',
+      '2) 按目标语言表达习惯重写，不逐字直译；',
+      '3) 专业术语给出译名并保留原文；',
+      '4) 歧义处给出两种译法并说明差异。',
+    ].join('\n'),
+  },
+  {
+    key: 'reviewer', phase: 3, name: '审查者', role: '质量把关与风险指出',
+    model: 'gpt-4o', temperature: 0.2, tags: ['审查', '质控'],
+    description: '挑毛病：找出错误、遗漏与风险，不做无原则的夸奖。',
+    hits: ['审查', '检查', '评审', '核对', '校对', '质量', '风险', '合规', 'review', 'audit', 'check'],
+    sys: [
+      '你是严格的质量审查者。要求：',
+      '1) 按「事实错误 / 逻辑漏洞 / 遗漏信息 / 表述歧义」分类列出问题；',
+      '2) 每条问题给出具体位置、为什么是问题、建议怎么改；',
+      '3) 没发现问题时明确说「未发现」，并说明你按什么标准检查的；',
+      '4) 不要为了让对方高兴而给无关紧要的赞美。',
+    ].join('\n'),
+  },
+  {
+    key: 'tester', phase: 3, name: '测试员', role: '用例设计与边界验证',
+    model: 'gpt-4o', temperature: 0.2, tags: ['测试', '验证'],
+    description: '设计能真正跑出问题的测试用例，重点覆盖边界与异常。',
+    hits: ['测试', '用例', '验证', '边界', '异常', '回归', 'test', 'case', 'qa'],
+    sys: [
+      '你是测试工程师。要求：',
+      '1) 列出正常路径用例，以及边界值、空值、超长、并发等异常用例；',
+      '2) 每条用例写明：前置条件 / 操作步骤 / 预期结果；',
+      '3) 标出哪些是「必须通过才能上线」的阻断项；',
+      '4) 明确指出这段实现里你最怀疑会出问题的位置。',
+    ].join('\n'),
+  },
+];
+
+const CAP_CATEGORIES = [
+  { name: '编程开发', keys: ['代码', '函数', '接口', '报错', '重构', '编程', '开发', '数据库', '部署', 'api', 'python', 'javascript', 'sql', 'bug'] },
+  { name: '写作', keys: ['写', '文案', '文章', '标题', '润色', '总结', '摘要', '报告', '邮件', '故事'] },
+  { name: '数据分析', keys: ['分析', '数据', '指标', '统计', '趋势', '估值', '财报', '洞察'] },
+  { name: '设计', keys: ['设计', '界面', '交互', '配色', '原型', '视觉', 'ui', 'ux'] },
+  { name: '运维', keys: ['运维', '服务器', '监控', '日志', 'docker', 'k8s', 'ci', '发布'] },
+  { name: '学习', keys: ['学习', '课程', '笔记', '讲解', '入门', '原理', '教程'] },
+];
+
+const CAP_STOPWORDS = /^(the|and|for|with|you|are|this|that|from|have|will|can|not|use|all|any|but|our|your|its|it|is|to|of|in|on|by|as|at|be|or|an|a|if|do|so|we|my|me|no|up|out|new|one|two|how|what|why|when|which|who|please|make|write|give|need|want)$/;
+
+function capGuessTitle(text) {
+  const first = (text.split(/\r?\n/).find((l) => l.trim().length > 0) || '').trim();
+  let t = first
+    .replace(/^#+\s*/, '')
+    .replace(/^[「『【\[(（]/, '')
+    .replace(/[」』】\])）]$/, '')
+    .replace(/[。！？!?.,，、:：;；]+$/, '')
+    .trim();
+  if (/^(请|帮我|麻烦|你|我们)/.test(t) && t.length > 24) {
+    // 「请你帮我写一个…」这类开头不适合做标题，截到第一个动作词之后
+    const m = t.match(/^(?:请|帮我|麻烦)?[^，,。]{0,14}[，,]?\s*(.{2,22})/);
+    if (m && m[1]) t = m[1].trim();
+  }
+  if (t.length > 30) t = t.slice(0, 30) + '…';
+  return t || '未命名提示词';
+}
+
+function capGuessCategory(text) {
+  let best = '', bestScore = 0;
+  for (const c of CAP_CATEGORIES) {
+    const s = c.keys.reduce((n, k) => n + (text.includes(k) ? 1 : 0), 0);
+    if (s > bestScore) { best = c.name; bestScore = s; }
+  }
+  return best || '通用';
+}
+
+function capGuessTags(text) {
+  const zhPool = ['提示词', '编程', '写作', '数据分析', '设计', '翻译', '总结', '审查', '规划', '学习', '自动化', '产品', '运营', '汇报', '效率'];
+  const zh = zhPool.filter((t) => text.includes(t));
+  const en = Array.from(new Set(
+    (text.match(/[A-Za-z][A-Za-z0-9+#-]{2,}/g) || [])
+      .map((s) => s.toLowerCase())
+      .filter((s) => !CAP_STOPWORDS.test(s))
+  )).slice(0, 4);
+  const out = [...zh.slice(0, 4), ...en];
+  return out.slice(0, 6);
+}
+
+const capByKey = (k) => CAP_AGENT_LIB.find((t) => t.key === k);
+
+// 分类 → 优先用哪个角色当「执行者」。只命中规划类时靠它补出执行环节。
+const CAP_EXEC_BY_CAT = {
+  '编程开发': 'coder', '运维': 'coder',
+  '写作': 'writer', '设计': 'writer', '学习': 'writer',
+  '数据分析': 'analyst',
+};
+
+/**
+ * 按命中强度挑 1~3 个 Agent，并按 phase 排成「规划 → 执行 → 把关」。
+ * 无论命中什么，链路的结构必须完整：不能缺执行环节，也不能缺把关环节 ——
+ * 一条没人检查的流水线价值有限，用户要的正是「谁在什么时候检查什么」。
+ */
+function capPickAgents(text, category) {
+  const scored = CAP_AGENT_LIB
+    .map((t) => ({ t, score: t.hits.reduce((n, k) => n + (text.includes(k) ? (k.length >= 2 ? 2 : 1) : 0), 0) }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  let picked = scored.slice(0, 3).map((x) => x.t);
+  if (!picked.length) picked = ['planner', 'writer', 'reviewer'].map(capByKey);
+
+  const exec = capByKey(CAP_EXEC_BY_CAT[category] || 'writer');
+  // 只命中规划类 → 补执行者，否则链路空转
+  if (picked.length === 1 && picked[0].phase === 1) picked.push(exec);
+  // 缺把关环节 → 补上；已经满 3 个就挤掉相关性最低的那个
+  if (!picked.some((x) => x.phase === 3)) {
+    if (picked.length >= 3) picked = picked.slice(0, 2);
+    picked.push(capByKey('reviewer'));
+  }
+  // 反过来：只有规划和把关也不行，中间得有人干活
+  if (!picked.some((x) => x.phase === 2) && picked.length < 3) picked.push(exec);
+
+  return picked.slice().sort((a, b) => a.phase - b.phase);
+}
+
+/** 清洗素材：去掉首尾空白和连续空行，但保留换行结构 */
+function capCleanText(text) {
+  return String(text || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
+ * 离线启发式生成：不依赖任何 API。
+ * 正文不改写（离线做不了高质量改写，硬编造反而更差），只做清洗与结构化提取；
+ * 想要「提炼版正文」就在设置里配 LLM Key。
+ */
+function offlineGenerate(text) {
+  const clean = capCleanText(text);
+  const title = capGuessTitle(clean);
+  const category = capGuessCategory(clean);
+  const agents = capPickAgents(clean, category);
+  const tasks = {
+    planner: '拆解目标与步骤，输出可验收的执行计划',
+    researcher: '补齐完成任务所需的背景资料与事实',
+    analyst: '分析数据并给出带依据的结论',
+    coder: '按计划实现代码并给出验证方式',
+    writer: '按目标读者撰写成稿',
+    translator: '按目标语言习惯完成转换',
+    reviewer: '审查产出，列出问题与修改建议',
+    tester: '设计用例覆盖边界与异常，标出阻断项',
+  };
+  return {
+    mode: 'offline',
+    note: '离线生成：不改写正文，只做结构化提取；配 LLM Key 可得到提炼版正文',
+    prompt: {
+      title,
+      category,
+      tags: capGuessTags(clean),
+      content: clean,
+    },
+    agents: agents.map((a) => ({
+      name: a.name, role: a.role, description: a.description,
+      systemPrompt: a.sys, model: a.model, temperature: a.temperature, tags: a.tags.slice(),
+    })),
+    orchestration: {
+      name: title.replace(/…$/, '') + ' · 执行链路',
+      description: '把「' + title + '」拆成 ' + agents.length + ' 个 Agent 依次执行。',
+      steps: agents.map((a, i) => ({ agentIndex: i, task: tasks[a.key] || a.role })),
+    },
+  };
+}
+
+/** 从 LLM 回复里抠出 JSON —— 模型常常会裹一层 ```json 或者前后加一句话 */
+function capParseLLMJson(raw) {
+  let s = String(raw || '').trim();
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) s = fence[1].trim();
+  const i = s.indexOf('{'), j = s.lastIndexOf('}');
+  if (i >= 0 && j > i) s = s.slice(i, j + 1);
+  return JSON.parse(s);
+}
+
+/** 规范化 LLM 结果：任何缺失字段都补成能用的形态，别让弹窗渲染炸掉 */
+function capNormalizeLLM(o, fallbackText) {
+  const p = o && o.prompt ? o.prompt : {};
+  const agents = (Array.isArray(o && o.agents) ? o.agents : [])
+    .filter((a) => a && (a.name || a.systemPrompt))
+    .slice(0, 3)
+    .map((a) => ({
+      name: String(a.name || '未命名 Agent'),
+      role: String(a.role || ''),
+      description: String(a.description || ''),
+      systemPrompt: String(a.systemPrompt || ''),
+      model: String(a.model || ''),
+      temperature: Number.isFinite(Number(a.temperature)) ? Number(a.temperature) : 0.3,
+      tags: Array.isArray(a.tags) ? a.tags.map(String).slice(0, 6) : [],
+    }));
+
+  const off = offlineGenerate(fallbackText);
+  const useAgents = agents.length ? agents : off.agents;
+
+  let steps = (o && o.orchestration && Array.isArray(o.orchestration.steps) ? o.orchestration.steps : [])
+    .map((s) => ({ agentIndex: Number(s && s.agentIndex), task: String((s && s.task) || '') }))
+    .filter((s) => Number.isInteger(s.agentIndex) && s.agentIndex >= 0 && s.agentIndex < useAgents.length);
+  if (!steps.length) steps = useAgents.map((a, i) => ({ agentIndex: i, task: a.role || '' }));
+
+  return {
+    mode: 'llm',
+    note: '',
+    prompt: {
+      title: String(p.title || off.prompt.title),
+      category: String(p.category || off.prompt.category),
+      tags: Array.isArray(p.tags) && p.tags.length ? p.tags.map(String).slice(0, 8) : off.prompt.tags,
+      content: String(p.content || fallbackText || '').trim() || off.prompt.content,
+    },
+    agents: useAgents,
+    orchestration: {
+      name: String((o.orchestration && o.orchestration.name) || (off.orchestration.name)),
+      description: String((o.orchestration && o.orchestration.description) || off.orchestration.description),
+      steps,
+    },
+  };
+}
+
+async function llmGenerate(text, images) {
+  const c = cfgDefaults();
+  const sys = [
+    '你是提示词工程与多 Agent 编排专家。用户会给你一段素材（可能还有截图）。',
+    '请把素材整理成一条规范、可直接使用的提示词，并设计完成它所需的多 Agent 编排。',
+    '',
+    '只输出一个 JSON 对象，不要解释、不要 markdown 代码块。字段：',
+    '{',
+    '  "title": "简短标题（≤20 字）",',
+    '  "category": "分类，如 编程开发/写作/数据分析/设计/运维/学习",',
+    '  "tags": ["3~6 个标签"],',
+    '  "content": "可直接使用的完整提示词正文",',
+    '  "agents": [{"name":"","role":"","description":"","systemPrompt":"","model":"","temperature":0.3,"tags":[]}],',
+    '  "orchestration": {"name":"","description":"","steps":[{"agentIndex":0,"task":"这一步做什么"}]}',
+    '}',
+    '',
+    '硬性要求：',
+    '1) agents 1~3 个，按实际执行顺序排列：第一个负责规划，最后一个负责审查；不要凑数。',
+    '2) 每个 systemPrompt 必须具体到可直接投喂，写清角色、约束、输出格式，不要空话。',
+    '3) steps 的 agentIndex 是 agents 数组下标；每一步的 task 写清该 Agent 在这条链路里具体做什么。',
+    '4) content 是给最终使用者复制粘贴的完整提示词，不要写「见上文」这类引用。',
+  ].join('\n');
+
+  const userContent = (images && images.length)
+    ? [
+        { type: 'text', text: text || '（只提供了截图，请依据截图内容理解需求并生成。）' },
+        ...images.map((im) => ({ type: 'image_url', image_url: { url: im.dataUrl } })),
+      ]
+    : (text || '');
+
+  const r = await fetch(c.llmBase + '/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + c.llmKey },
+    body: JSON.stringify({
+      model: c.llmModel,
+      temperature: 0.4,
+      messages: [{ role: 'system', content: sys }, { role: 'user', content: userContent }],
+    }),
+  });
+  const raw = await r.text();
+  if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + raw.slice(0, 160));
+  let j = null;
+  try { j = JSON.parse(raw); } catch (e) { throw new Error('返回不是 JSON'); }
+  const msg = j && j.choices && j.choices[0] && j.choices[0].message;
+  const content = msg && msg.content;
+  if (!content) throw new Error('模型返回为空');
+  return capNormalizeLLM(capParseLLMJson(content), text);
+}
+
+async function captureGenerate() {
+  if (capBusy) return;
+  const text = (($('#cap_text') || {}).value || '').trim();
+  if (!text && !capImages.length) return toast('先粘贴一些文字或截图', true);
+
+  capBusy = true;
+  const btn = $('#cap_genBtn');
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = '⏳ 生成中…';
+  setCapStatus('');
+
+  try {
+    const mode = capMode();
+    const wantLLM = mode === 'auto' && llmReady();
+    let res;
+    if (wantLLM) {
+      setCapStatus('正在调用大模型…');
+      try {
+        res = await llmGenerate(text, capImages);
+      } catch (e) {
+        res = offlineGenerate(text);
+        res.note = '大模型调用失败，已回退离线生成（' + e.message + '）';
+        setCapStatus('大模型调用失败，已回退离线生成', 'warn');
+      }
+    } else {
+      res = offlineGenerate(text);
+      if (mode === 'auto') setCapStatus('未配置 LLM Key，已走离线生成（可在设置里填）', 'warn');
+    }
+    capResult = res;
+    renderCapResult();
+    $('#capModal').classList.remove('hidden');
+  } finally {
+    capBusy = false;
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+function renderCapResult() {
+  const box = $('#capResult');
+  if (!box) return;
+  const r = capResult;
+  if (!r) { box.innerHTML = ''; return; }
+  const badge = r.mode === 'llm' ? '🪄 大模型生成' : '⚙ 离线生成';
+  box.innerHTML = [
+    '<p class="hint">' + badge + (r.note ? ' · ' + escapeHtml(r.note) : '') + '</p>',
+
+    '<h4 class="cap-h">📝 提示词</h4>',
+    '<div class="cap-block">',
+    '  <div class="cap-kv"><b>' + escapeHtml(r.prompt.title) + '</b></div>',
+    '  <div class="cap-kv">分类：' + escapeHtml(r.prompt.category || '未分类') + '</div>',
+    '  <div class="cap-kv">标签：' + ((r.prompt.tags || []).map((t) => '<span class="tag">' + escapeHtml(t) + '</span>').join(' ') || '—') + '</div>',
+    '  <pre class="cap-pre">' + escapeHtml(r.prompt.content) + '</pre>',
+    '</div>',
+
+    '<h4 class="cap-h">🤖 Agent（' + r.agents.length + '）</h4>',
+    r.agents.map((a, i) => [
+      '<div class="cap-block">',
+      '  <div class="cap-kv"><b>' + (i + 1) + '. ' + escapeHtml(a.name) + '</b>' + (a.role ? ' · ' + escapeHtml(a.role) : '') + '</div>',
+      '  <div class="cap-kv cap-dim">模型 ' + escapeHtml(a.model || '—') + ' · 温度 ' + escapeHtml(String(a.temperature)) + '</div>',
+      a.description ? '  <div class="cap-kv cap-dim">' + escapeHtml(a.description) + '</div>' : '',
+      '  <pre class="cap-pre">' + escapeHtml(a.systemPrompt) + '</pre>',
+      '</div>',
+    ].join('')).join(''),
+
+    '<h4 class="cap-h">🔗 编排链路</h4>',
+    '<div class="cap-block">',
+    '  <div class="cap-kv"><b>' + escapeHtml(r.orchestration.name) + '</b></div>',
+    r.orchestration.description ? '  <div class="cap-kv cap-dim">' + escapeHtml(r.orchestration.description) + '</div>' : '',
+    '  <div class="chain">',
+    (r.orchestration.steps || []).map((s, i) => [
+      i > 0 ? '    <div class="chain-arrow">↓</div>' : '',
+      '    <div class="chain-step">',
+      '      <span class="chain-idx">' + (i + 1) + '</span>',
+      '      <span class="chain-agent">' + escapeHtml(r.agents[s.agentIndex] ? r.agents[s.agentIndex].name : '—') + '</span>',
+      '      <span class="chain-task">' + escapeHtml(s.task || '') + '</span>',
+      '    </div>',
+    ].join('')).join(''),
+    '  </div>',
+    '</div>',
+  ].join('\n');
+}
+
+/** 把生成结果整体落库：1 提示词 + N Agent + 1 编排，一次同步 */
+async function saveCapResult() {
+  const r = capResult;
+  if (!r) return;
+  const now = Date.now();
+  const agentCount = r.agents.length;
+
+  vault.prompts.unshift({
+    id: uid(), title: r.prompt.title, content: r.prompt.content,
+    category: r.prompt.category, tags: (r.prompt.tags || []).slice(),
+    createdAt: now, updatedAt: now,
+  });
+
+  const idMap = [];
+  r.agents.forEach((a) => {
+    const id = uid();
+    idMap.push(id);
+    vault.agents.unshift({
+      id, name: a.name, role: a.role, description: a.description,
+      systemPrompt: a.systemPrompt, model: a.model, temperature: a.temperature,
+      tags: (a.tags || []).slice(), createdAt: now, updatedAt: now,
+    });
+  });
+
+  vault.orchestrations.unshift({
+    id: uid(), name: r.orchestration.name, description: r.orchestration.description,
+    steps: (r.orchestration.steps || [])
+      .filter((s) => idMap[s.agentIndex])
+      .map((s) => ({ agentId: idMap[s.agentIndex], task: s.task })),
+    createdAt: now, updatedAt: now,
+  });
+
+  closeModal('capModal');
+  renderAll();
+  switchView('prompts');
+  capResult = null;
+  // 先等同步走完：saveVault 自己的提示会被随后这条完整说明覆盖，
+  // 所以顺序不能反，否则用户只看到「已同步」而不知道到底生成了几样东西。
+  const res = await saveVault('从捕捉生成');
+  toast('已生成 1 条提示词、' + agentCount + ' 个 Agent、1 条编排'
+    + (res && res.saved === 'github' ? '，已同步到云端' : '（仅存本机）'));
+}
+
+function capCopyAll() {
+  const r = capResult;
+  if (!r) return;
+  const L = [];
+  L.push('# 提示词：' + r.prompt.title);
+  L.push('分类：' + (r.prompt.category || '未分类'));
+  L.push('标签：' + (r.prompt.tags || []).join(', '));
+  L.push('');
+  L.push(r.prompt.content);
+  r.agents.forEach((a, i) => {
+    L.push('');
+    L.push('---');
+    L.push('# Agent ' + (i + 1) + '：' + a.name + (a.role ? '（' + a.role + '）' : ''));
+    L.push('模型：' + (a.model || '—') + ' / 温度：' + a.temperature);
+    L.push('');
+    L.push(a.systemPrompt);
+  });
+  L.push('');
+  L.push('---');
+  L.push('# 编排：' + r.orchestration.name);
+  (r.orchestration.steps || []).forEach((s, i) => {
+    const nm = r.agents[s.agentIndex] ? r.agents[s.agentIndex].name : '—';
+    L.push((i + 1) + '. [' + nm + '] ' + (s.task || ''));
+  });
+  copyText(L.join('\n'), '已复制提示词 + Agent + 编排');
+}
+
+function capClear() {
+  const box = $('#cap_text');
+  if (box) box.value = '';
+  capImages = [];
+  renderCapThumbs();
+  setCapStatus('');
+}
+
+function capMode() {
+  const el = $('#cap_mode');
+  return el ? el.value : 'auto';
+}
+
+function bindCapture() {
+  const paste = $('#cap_text');
+  if (paste) paste.addEventListener('input', capMeta);
+  const fileBtn = $('#cap_fileBtn');
+  const file = $('#cap_file');
+  if (fileBtn && file) {
+    fileBtn.addEventListener('click', () => file.click());
+    file.addEventListener('change', () => { capAddFiles(file.files); file.value = ''; });
+  }
+  const clear = $('#cap_clearBtn');
+  if (clear) clear.addEventListener('click', capClear);
+  const gen = $('#cap_genBtn');
+  if (gen) gen.addEventListener('click', captureGenerate);
+  const save = $('#capSaveBtn');
+  if (save) save.addEventListener('click', saveCapResult);
+  const copy = $('#capCopyBtn');
+  if (copy) copy.addEventListener('click', capCopyAll);
+
+  // 缩略图上的删除按钮（事件委托，缩略图是动态渲染的）
+  const thumbs = $('#cap_thumbs');
+  if (thumbs) {
+    thumbs.addEventListener('click', (ev) => {
+      const id = ev.target && ev.target.getAttribute && ev.target.getAttribute('data-capdel');
+      if (!id) return;
+      capImages = capImages.filter((x) => x.id !== id);
+      renderCapThumbs();
+    });
+  }
+
+  bindCapDrop();
+  document.addEventListener('paste', capOnPaste);
+  capMeta();
 }
 
 // ---------------- 视图切换 ----------------
 function switchView(view) {
   currentView = view;
   $$('.vtab').forEach((b) => b.classList.toggle('active', b.getAttribute('data-view') === view));
-  ['prompts', 'agents', 'orchestrations'].forEach((v) => {
+  ['capture', 'prompts', 'agents', 'orchestrations'].forEach((v) => {
     const el = $('#view-' + v);
     if (el) el.classList.toggle('hidden', v !== view);
   });
@@ -1174,6 +1877,12 @@ async function openSettings() {
     }
     ['s_owner', 's_repo', 's_file', 's_branch'].forEach((id) => { $('#' + id).disabled = !!c.isProxy; });
     $('#s_private').checked = c.private !== false;
+    // LLM 配置是纯前端项（不参与凭据通道），Key 只回显「已保存」不回明文
+    const lc = cfgDefaults();
+    $('#s_llmBase').value = lc.llmBase;
+    $('#s_llmModel').value = lc.llmModel;
+    $('#s_llmKey').value = '';
+    $('#s_llmKey').placeholder = lc.llmKey ? '已保存（留空则不变）' : '留空 = 只用离线生成';
     setSettingsStatus('');
   } catch (e) { /* ignore */ }
   $('#settingsModal').classList.remove('hidden');
@@ -1190,6 +1899,9 @@ async function submitSettings() {
     file: apiBase ? '' : $('#s_file').value.trim(),
     branch: apiBase ? '' : $('#s_branch').value.trim(),
     private: $('#s_private').checked,
+    llmBase: $('#s_llmBase').value.trim(),
+    llmKey: $('#s_llmKey').value.trim(),
+    llmModel: $('#s_llmModel').value.trim(),
   };
   if (!body.repo && !apiBase) return toast('请填写仓库名（或填代理地址）', true);
   setSettingsStatus(apiBase ? '正在通过代理校验…' : '正在校验并创建/连接仓库…');
@@ -1255,6 +1967,9 @@ function closeModal(id) { $('#' + id).classList.add('hidden'); }
 function bind() {
   // 主题
   $('#themeBtn').addEventListener('click', cycleTheme);
+
+  // 捕捉页（粘贴 / 拖拽 / 生成）
+  bindCapture();
 
   // 视图切换
   $('#viewTabs').addEventListener('click', (e) => {
