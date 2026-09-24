@@ -999,12 +999,31 @@ function capParseLLMJson(raw) {
   if (fence) s = fence[1].trim();
   const i = s.indexOf('{'), j = s.lastIndexOf('}');
   if (i >= 0 && j > i) s = s.slice(i, j + 1);
-  return JSON.parse(s);
+  try {
+    const o = JSON.parse(s);
+    // 模型偶尔回个裸 null / 数字，这类也不当结果
+    return o && typeof o === 'object' ? o : null;
+  } catch (e) {
+    // 没按 JSON 回就返回 null（而不是抛错）：调用方据此给一句人话再回退离线，
+    // 否则用户看到的会是 "Unexpected token 好 ..." 这种原始报错。
+    return null;
+  }
 }
 
 /** 规范化 LLM 结果：任何缺失字段都补成能用的形态，别让弹窗渲染炸掉 */
-function capNormalizeLLM(o, fallbackText) {
-  const p = o && o.prompt ? o.prompt : {};
+function capNormalizeLLM(raw, fallbackText) {
+  // 先归一成对象：解析失败时 raw 是 null，这里若不强转，下面的 o.orchestration 会直接抛
+  // TypeError，把「回退离线」变成一条内部报错。
+  const o = raw && typeof raw === 'object' ? raw : {};
+  const p = o.prompt && typeof o.prompt === 'object' ? o.prompt : {};
+  // 规范形状是 { prompt:{…}, agents:[…], orchestration:{…} }，但有的模型会把 prompt 里的
+  // 字段平铺到顶层。两种都认 —— 否则 title/content 会静默回落到离线猜测，把模型写好的
+  // 正文整段丢掉（这是真踩过的坑，不是防御性冗余）。
+  const pick = (k) => {
+    const v = p[k];
+    if (v !== undefined && v !== null && v !== '') return v;
+    return o ? o[k] : undefined;
+  };
   const agents = (Array.isArray(o && o.agents) ? o.agents : [])
     .filter((a) => a && (a.name || a.systemPrompt))
     .slice(0, 3)
@@ -1026,14 +1045,15 @@ function capNormalizeLLM(o, fallbackText) {
     .filter((s) => Number.isInteger(s.agentIndex) && s.agentIndex >= 0 && s.agentIndex < useAgents.length);
   if (!steps.length) steps = useAgents.map((a, i) => ({ agentIndex: i, task: a.role || '' }));
 
+  const llmTags = pick('tags');
   return {
     mode: 'llm',
     note: '',
     prompt: {
-      title: String(p.title || off.prompt.title),
-      category: String(p.category || off.prompt.category),
-      tags: Array.isArray(p.tags) && p.tags.length ? p.tags.map(String).slice(0, 8) : off.prompt.tags,
-      content: String(p.content || fallbackText || '').trim() || off.prompt.content,
+      title: String(pick('title') || off.prompt.title),
+      category: String(pick('category') || off.prompt.category),
+      tags: Array.isArray(llmTags) && llmTags.length ? llmTags.map(String).slice(0, 8) : off.prompt.tags,
+      content: String(pick('content') || fallbackText || '').trim() || off.prompt.content,
     },
     agents: useAgents,
     orchestration: {
@@ -1052,10 +1072,10 @@ async function llmGenerate(text, images) {
     '',
     '只输出一个 JSON 对象，不要解释、不要 markdown 代码块。字段：',
     '{',
-    '  "title": "简短标题（≤20 字）",',
-    '  "category": "分类，如 编程开发/写作/数据分析/设计/运维/学习",',
-    '  "tags": ["3~6 个标签"],',
-    '  "content": "可直接使用的完整提示词正文",',
+    '  "prompt": { "title": "简短标题（≤20 字）",',
+    '              "category": "分类，如 编程开发/写作/数据分析/设计/运维/学习",',
+    '              "tags": ["3~6 个标签"],',
+    '              "content": "可直接使用的完整提示词正文" },',
     '  "agents": [{"name":"","role":"","description":"","systemPrompt":"","model":"","temperature":0.3,"tags":[]}],',
     '  "orchestration": {"name":"","description":"","steps":[{"agentIndex":0,"task":"这一步做什么"}]}',
     '}',
@@ -1090,7 +1110,9 @@ async function llmGenerate(text, images) {
   const msg = j && j.choices && j.choices[0] && j.choices[0].message;
   const content = msg && msg.content;
   if (!content) throw new Error('模型返回为空');
-  return capNormalizeLLM(capParseLLMJson(content), text);
+  const parsed = capParseLLMJson(content);
+  if (!parsed) throw new Error('模型返回的不是 JSON');
+  return capNormalizeLLM(parsed, text);
 }
 
 async function captureGenerate() {
