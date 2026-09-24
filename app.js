@@ -10,6 +10,9 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 let vault = { version: 2, prompts: [], agents: [], orchestrations: [] };
+// 最近一次「与远端一致」的快照，用于写入前的三方合并。
+// 没有它就分不清「本地新增」和「远端他人新增」，整份覆盖会把别人刚提交的内容抹掉。
+let baseVault = { version: 2, prompts: [], agents: [], orchestrations: [] };
 let currentView = 'prompts';
 let editingPromptId = null;
 let editingAgentId = null;
@@ -293,17 +296,41 @@ async function localVaultGet() {
 }
 
 async function localVaultPost(body) {
-  const vault = normalizeVault(body.vault);
-  writeCache(vault);
+  const localVault = normalizeVault(body.vault);
+  writeCache(localVault);
   const c = cfgDefaults();
   if (!isConfigured(c)) {
     return { ok: true, saved: 'local', message: '未配置 GitHub，仅保存在浏览器本地' };
   }
-  try {
+
+  // 先取远端最新 → 与本地做三方合并 → 再写入。
+  // 少这一步就会出现「A 提交、B 提交、A 的内容没了」的静默丢数据（真机复现过）。
+  const pushOnce = async () => {
     const remote = await ghReadFile();
-    const r = await ghWriteFile(vault, remote.sha, body.message);
-    return { ok: true, saved: 'github', sha: r.content && r.content.sha, commit: r.commit && r.commit.sha };
+    const m = mergeVault(baseVault, localVault, remote.vault);
+    const merged = normalizeVault(m);
+    const r = await ghWriteFile(merged, remote.sha, body.message);
+    baseVault = vaultClone(merged);
+    vault = merged;               // 写回全局，界面才能反映合并进来的内容
+    writeCache(merged);
+    return {
+      ok: true, saved: 'github',
+      sha: r.content && r.content.sha,
+      commit: r.commit && r.commit.sha,
+      conflicts: m.conflicts,
+      broughtIn: JSON.stringify(merged) !== JSON.stringify(localVault),
+    };
+  };
+
+  try {
+    return await pushOnce();
   } catch (e) {
+    // 极窄的竞态窗口：读出之后、写入之前别人又提交了 → GitHub 返回 409/422。
+    // 重新读一次再合并重试即可，不需要让用户手动操作。
+    if (e.status === 409 || e.status === 422) {
+      try { return Object.assign(await pushOnce(), { retried: true }); }
+      catch (e2) { return { ok: false, saved: 'local', warning: 'GitHub 写入冲突且重试失败，已保存到浏览器本地: ' + e2.message }; }
+    }
     return { ok: false, saved: 'local', warning: 'GitHub 写入失败，已保存到浏览器本地: ' + e.message };
   }
 }
@@ -464,8 +491,10 @@ async function loadVault(silent) {
   try {
     const r = await api('/api/vault');
     vault = normalizeVault(r.vault);
-    if (r.source === 'github') setSyncState('已连接 GitHub', 'ok');
-    else if (r.source === 'local-fallback') setSyncState('本地缓存（GitHub 异常）', 'warn');
+    if (r.source === 'github') {
+      setSyncState('已连接 GitHub', 'ok');
+      baseVault = vaultClone(vault);      // 记下基线，后续写入靠它做三方合并
+    } else if (r.source === 'local-fallback') setSyncState('本地缓存（GitHub 异常）', 'warn');
     else setSyncState('未配置 GitHub', 'warn');
     renderAll();
     if (!silent) {
@@ -485,12 +514,74 @@ function normalizeVault(v) {
   return v;
 }
 
+// ---------------- 写入前的三方合并 ----------------
+// 背景：A、B 同时打开页面，各自新增 —— 后保存的人手里是「打开时那份」旧快照，
+// 直接整份 PUT 上去会把先保存的人的内容抹掉（真机 e2e 复现过，是静默丢数据）。
+// 所以每次写入前先取远端最新，与本地做三方合并，再写合并结果。
+const vaultClone = (v) => JSON.parse(JSON.stringify(normalizeVault(v)));
+
+/** 稳定标识：优先 id，退化为标题/名称 */
+function itemKeyOf(x, i) {
+  return String((x && (x.id || x.title || x.name)) || '#' + i);
+}
+
+/**
+ * 合并同一类集合（prompts / agents / orchestrations 各调一次）。
+ *   base   上次与远端一致的快照
+ *   local  本机当前
+ *   remote 远端最新
+ * 规则：
+ *   远端有、本地没有 → 基线也没有则是他人新增，保留；基线有则本地删除过，尊重删除
+ *   本地有、远端没有 → 基线也没有则是本地新增，保留；基线有则远端删除过，尊重删除
+ *   两边都有         → 只有一边改过就用改过的那边；两边都改过用本地并把冲突计数 +1
+ */
+function mergeKind(baseArr, localArr, remoteArr) {
+  const bm = new Map(baseArr.map((x, i) => [itemKeyOf(x, i), x]));
+  const lm = new Map(localArr.map((x, i) => [itemKeyOf(x, i), x]));
+  const rm = new Map(remoteArr.map((x, i) => [itemKeyOf(x, i), x]));
+  const out = [];
+  let conflicts = 0;
+
+  // 先按远端顺序走，保持云端既有排列
+  for (const [id, rv] of rm) {
+    if (!lm.has(id)) { if (!bm.has(id)) out.push(rv); continue; }
+    const lv = lm.get(id), bv = bm.get(id);
+    const lChanged = !bm.has(id) || JSON.stringify(lv) !== JSON.stringify(bv);
+    const rChanged = !bm.has(id) || JSON.stringify(rv) !== JSON.stringify(bv);
+    if (lChanged && rChanged) conflicts++;
+    out.push(!lChanged && rChanged ? rv : lv);
+  }
+  // 再把本地新增的追加在后面
+  for (const [id, lv] of lm) {
+    if (!rm.has(id) && !bm.has(id)) out.push(lv);
+  }
+  return { out, conflicts };
+}
+
+function mergeVault(base, local, remote) {
+  const B = normalizeVault(base), L = normalizeVault(local), R = normalizeVault(remote);
+  const p = mergeKind(B.prompts, L.prompts, R.prompts);
+  const a = mergeKind(B.agents, L.agents, R.agents);
+  const o = mergeKind(B.orchestrations, L.orchestrations, R.orchestrations);
+  return {
+    version: 2,
+    prompts: p.out,
+    agents: a.out,
+    orchestrations: o.out,
+    conflicts: p.conflicts + a.conflicts + o.conflicts,
+  };
+}
+
 async function saveVault(message) {
   try {
     const r = await api('/api/vault', { method: 'POST', body: { vault, message } });
     if (r.saved === 'github') {
       setSyncState('已同步 GitHub', 'ok');
-      toast('已同步到 GitHub');
+      // 合并可能把别人新增的内容带了回来 → 必须重渲染，否则界面和云端不一致
+      if (r.broughtIn) renderAll();
+      if (r.conflicts) toast(`已同步（${r.conflicts} 处同时被改，保留本机版本）`);
+      else if (r.broughtIn) toast('已同步到 GitHub，并带回了别人的新内容');
+      else toast('已同步到 GitHub');
     } else {
       setSyncState('仅保存本地', 'warn');
       toast(r.warning || r.message || '已保存到本地', r.warning ? true : false);
@@ -1173,6 +1264,9 @@ function bind() {
 
   // 同步 / 设置
   $('#syncBtn').addEventListener('click', () => loadVault(false));
+  // 手动上传入口：新增/编辑本身会自动上传，这里是「自动上传失败后重试」和「强制对齐云端」的出口。
+  // 走同一个 saveVault，所以多人共用时同样会先合并再写，不会覆盖别人的内容。
+  $('#pushBtn').addEventListener('click', () => saveVault('手动上传'));
   $('#settingsBtn').addEventListener('click', openSettings);
   $('#settingsSaveBtn').addEventListener('click', submitSettings);
   $('#s_testBtn').addEventListener('click', testConnection);
