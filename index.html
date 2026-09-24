@@ -29,6 +29,7 @@
     <button class="vtab active" data-view="prompts">💬 提示词</button>
     <button class="vtab" data-view="agents">🤖 Agents</button>
     <button class="vtab" data-view="orchestrations">🔗 编排</button>
+    <button class="vtab" data-view="kb">📚 参考库</button>
   </nav>
 
   <div class="topbar-right">
@@ -103,7 +104,7 @@
     <div id="promptGrid" class="grid"></div>
     <div id="promptEmpty" class="empty hidden">
       <p class="empty-icon">🗂️</p>
-      <p>还没有提示词，点右上角「新建提示词」开始沉淀。</p>
+      <p>还没有提示词，点右上角「新建提示词」开始沉淀；也可以去「📚 参考库」挑一条现成的套用。</p>
     </div>
   </section>
 
@@ -159,6 +160,48 @@
     </div>
   </section>
 
+  <!-- ============ 参考库视图 ============ -->
+  <section id="view-kb" class="view hidden">
+    <div class="subhead glass">
+      <div>
+        <h2>参考库</h2>
+        <p class="subhead-desc">
+          不用连网搜索：把 4 个多 Agent 开源仓库里值得抄的做法离线整理成条目，搜到就能一键套用成你的提示词 / Agent / 编排。
+        </p>
+      </div>
+      <div class="subhead-actions">
+        <input id="kbSearch" class="input search" type="search" placeholder="搜做法，如：评审 / 定位 / 沙箱 / 度量 / 拆分…" />
+        <button id="kbSrcBtn" class="btn ghost" title="看这 4 个来源的当前状态（含已停更提醒）">📖 来源说明</button>
+      </div>
+    </div>
+
+    <div class="kb-filters glass">
+      <div class="kb-filter-row">
+        <span class="kb-filter-lbl">类型</span>
+        <div id="kbKindFilter" class="kb-chips"></div>
+      </div>
+      <div class="kb-filter-row">
+        <span class="kb-filter-lbl">来源</span>
+        <div id="kbSourceFilter" class="kb-chips"></div>
+      </div>
+      <div class="kb-filter-row">
+        <span class="kb-filter-lbl">说明</span>
+        <p class="kb-note">
+          这是<b>本地精选</b>，不是全网代码搜索：<b>建议来自</b> microsoft/autogen（角色与拓扑）、
+          princeton-nlp/SWE-agent（接口与反馈）、All-Hands-AI/OpenHands（执行循环与沙箱）、
+          stanfordnlp/dspy（提示词结构）。搜不到时会给出最接近的几条，不会一片空白。
+        </p>
+      </div>
+    </div>
+
+    <div id="kbMeta" class="kb-meta"></div>
+    <div id="kbGrid" class="kb-grid"></div>
+    <div id="kbEmpty" class="empty hidden">
+      <p class="empty-icon">📚</p>
+      <p>没有匹配的做法。换个词试试，比如「审查」「验证」「拆分」「上下文」。</p>
+    </div>
+  </section>
+
 </main>
 
 <!-- ============ 捕捉结果弹窗 ============ -->
@@ -202,6 +245,7 @@
     </div>
     <div class="modal-foot">
       <button class="btn ghost" data-close="promptModal">取消</button>
+      <button id="optFromPromptBtn" class="btn ghost" title="检查结构并补全缺失的部分，原文会保留">🪄 优化提示词</button>
       <button id="promptSaveBtn" class="btn primary">保存</button>
     </div>
   </div>
@@ -262,6 +306,7 @@
         </label>
       </div>
       <label>步骤链路</label>
+      <p id="o_hint" class="hint hidden"></p>
       <div id="o_steps" class="steps"></div>
       <button id="addStepBtn" class="btn ghost sm">+ 添加步骤</button>
     </div>
@@ -380,9 +425,87 @@
   </div>
 </div>
 
+<!-- ============ 参考库来源说明 ============ -->
+<div id="kbSrcModal" class="modal hidden">
+  <div class="modal-card glass">
+    <div class="modal-head">
+      <h3>参考库的来源</h3>
+      <button class="btn ghost icon-btn modal-close" data-close="kbSrcModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint">
+        这 4 个仓库的<b>当前状态</b>我一并写在下面 —— 有几个已经停更或改名字了，
+        抄概念可以，选型别照着抄。
+      </p>
+      <div id="kbSrcBody"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" data-close="kbSrcModal">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 提示词优化弹窗 ============ -->
+<div id="optModal" class="modal hidden">
+  <div class="modal-card glass wide">
+    <div class="modal-head">
+      <h3>🪄 优化提示词</h3>
+      <button class="btn ghost icon-btn modal-close" data-close="optModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint">
+        按 DSPy 的思路做：先声明<b>输入 / 输出</b>，再补<b>约束 / 示例 / 自检 / 成功标准</b>。
+        原文<b>整段保留</b>在「# 任务」下方，不会被改写 —— 只补缺失的部分。
+      </p>
+
+      <div class="opt-score-row">
+        <div class="opt-score">
+          <span class="opt-score-lbl">优化前</span>
+          <div class="opt-score-bar"><i id="optBarBefore"></i></div>
+          <b id="optNumBefore" class="opt-score-num">0</b>
+        </div>
+        <span class="opt-score-arrow">→</span>
+        <div class="opt-score">
+          <span class="opt-score-lbl">优化后</span>
+          <div class="opt-score-bar good"><i id="optBarAfter"></i></div>
+          <b id="optNumAfter" class="opt-score-num good">0</b>
+        </div>
+        <span class="opt-score-hint" title="结构分 = 权重加权的完成度，只衡量「该有的部分有没有」，不评价文笔">结构完整度</span>
+      </div>
+
+      <div id="optChanges" class="opt-changes"></div>
+
+      <div class="opt-cols">
+        <div class="opt-col">
+          <div class="opt-col-head">原文 <span id="optOrigMeta" class="opt-col-meta"></span></div>
+          <textarea id="optOrig" class="input opt-pre" rows="12" readonly></textarea>
+        </div>
+        <div class="opt-col">
+          <div class="opt-col-head">优化后 <span id="optNewMeta" class="opt-col-meta"></span>
+            <span class="lbl-hint">可直接改</span>
+          </div>
+          <textarea id="optNew" class="input opt-pre" rows="12"></textarea>
+        </div>
+      </div>
+
+      <p id="optNote" class="hint hidden"></p>
+      <div id="optStatus" class="settings-status"></div>
+    </div>
+    <div class="modal-foot">
+      <label id="optLlmWrap" class="checkbox-line hidden" title="走大模型深度重写；Key 不出本机（纯静态版由浏览器直连你配置的接口）">
+        <input id="optUseLLM" type="checkbox" /> 用大模型深度优化
+      </label>
+      <button class="btn ghost" data-close="optModal">取消</button>
+      <button id="optCopyNewBtn" class="btn ghost">📋 复制优化后</button>
+      <button id="optApplyBtn" class="btn primary">采用</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="toast hidden"></div>
 
 <script src="./pkg.js"></script>
+<script src="./kb.js"></script>
 <script src="./app.js"></script>
 </body>
 </html>

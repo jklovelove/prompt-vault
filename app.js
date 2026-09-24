@@ -1169,6 +1169,7 @@ function renderCapResult() {
     '  <div class="cap-kv">分类：' + escapeHtml(r.prompt.category || '未分类') + '</div>',
     '  <div class="cap-kv">标签：' + ((r.prompt.tags || []).map((t) => '<span class="tag">' + escapeHtml(t) + '</span>').join(' ') || '—') + '</div>',
     '  <pre class="cap-pre">' + escapeHtml(r.prompt.content) + '</pre>',
+    '  <div class="cap-block-foot"><button class="btn sm accent" data-capopt="1">🪄 优化提示词</button></div>',
     '</div>',
 
     '<h4 class="cap-h">🤖 Agent（' + r.agents.length + '）</h4>',
@@ -1320,10 +1321,12 @@ function bindCapture() {
 function switchView(view) {
   currentView = view;
   $$('.vtab').forEach((b) => b.classList.toggle('active', b.getAttribute('data-view') === view));
-  ['capture', 'prompts', 'agents', 'orchestrations'].forEach((v) => {
+  ['capture', 'prompts', 'agents', 'orchestrations', 'kb'].forEach((v) => {
     const el = $('#view-' + v);
     if (el) el.classList.toggle('hidden', v !== view);
   });
+  // 参考库不随数据变化，只在切进来时渲染一次（25 条，重渲染代价可忽略）
+  if (view === 'kb') { renderKbFilters(); renderKb(); }
 }
 
 function renderAll() {
@@ -1377,6 +1380,7 @@ function renderPrompts() {
       <div class="card-body">${escapeHtml(p.content || '')}</div>
       <div class="card-tags">${(p.tags || []).map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</div>
       <div class="card-foot">
+        <button class="btn sm accent" data-popt="${p.id}" title="检查结构、补全缺失的部分，原文会保留">🪄 优化</button>
         <button class="btn sm" data-pcopy="${p.id}">复制</button>
         <button class="btn sm" data-pedit="${p.id}">编辑</button>
         <button class="btn sm" data-pdel="${p.id}">删除</button>
@@ -1385,14 +1389,20 @@ function renderPrompts() {
   $('#promptEmpty').classList.toggle('hidden', list.length > 0);
 }
 
-function openPromptModal(id) {
+/**
+ * prefill：来自「📚 参考库」的预填对象。
+ * 与 id 互斥：给了 id 就是编辑已有条目，否则用 prefill 当初始值（此时不是编辑态，
+ * 保存走的是「新增」分支 —— 套用参考做法本来就是在新建一条，不该覆盖原条目）。
+ */
+function openPromptModal(id, prefill) {
   editingPromptId = id || null;
   const p = id ? vault.prompts.find((x) => x.id === id) : null;
-  $('#promptModalTitle').textContent = p ? '编辑提示词' : '新建提示词';
-  $('#p_title').value = p ? p.title || '' : '';
-  $('#p_category').value = p ? p.category || '' : '';
-  $('#p_tags').value = p ? (p.tags || []).join(', ') : '';
-  $('#p_content').value = p ? p.content || '' : '';
+  const s = p || prefill || null;
+  $('#promptModalTitle').textContent = p ? '编辑提示词' : (prefill ? '套用参考做法 · 提示词' : '新建提示词');
+  $('#p_title').value = s ? s.title || '' : '';
+  $('#p_category').value = s ? s.category || '' : '';
+  $('#p_tags').value = s ? (s.tags || []).join(', ') : '';
+  $('#p_content').value = s ? s.content || '' : '';
   $('#promptModal').classList.remove('hidden');
   setTimeout(() => $('#p_title').focus(), 60);
 }
@@ -1504,16 +1514,17 @@ function syncAgentSelection() {
   renderSelBar();
 }
 
-function openAgentModal(id) {
+function openAgentModal(id, prefill) {
   editingAgentId = id || null;
   const a = id ? vault.agents.find((x) => x.id === id) : null;
-  $('#agentModalTitle').textContent = a ? '编辑 Agent' : '新建 Agent';
-  $('#a_name').value = a ? a.name || '' : '';
-  $('#a_role').value = a ? a.role || '' : '';
-  $('#a_model').value = a ? a.model || '' : '';
-  $('#a_tags').value = a ? (a.tags || []).join(', ') : '';
-  $('#a_desc').value = a ? a.description || '' : '';
-  $('#a_system').value = a ? a.systemPrompt || '' : '';
+  const s = a || prefill || null;
+  $('#agentModalTitle').textContent = a ? '编辑 Agent' : (prefill ? '套用参考做法 · Agent' : '新建 Agent');
+  $('#a_name').value = s ? s.name || '' : '';
+  $('#a_role').value = s ? s.role || '' : '';
+  $('#a_model').value = s ? s.model || '' : '';
+  $('#a_tags').value = s ? (s.tags || []).join(', ') : '';
+  $('#a_desc').value = s ? s.description || '' : '';
+  $('#a_system').value = s ? s.systemPrompt || '' : '';
   $('#agentModal').classList.remove('hidden');
   setTimeout(() => $('#a_name').focus(), 60);
 }
@@ -1586,13 +1597,14 @@ function renderOrchestrations() {
   $('#orchEmpty').classList.toggle('hidden', vault.orchestrations.length > 0);
 }
 
-function openOrchModal(id) {
+function openOrchModal(id, prefill) {
   editingOrchId = id || null;
   const o = id ? vault.orchestrations.find((x) => x.id === id) : null;
-  $('#orchModalTitle').textContent = o ? '编辑编排' : '新建编排';
-  $('#o_name').value = o ? o.name || '' : '';
-  $('#o_desc').value = o ? o.description || '' : '';
-  $('#o_steps').dataset.steps = JSON.stringify(o ? o.steps || [] : []);
+  const s = o || prefill || null;
+  $('#orchModalTitle').textContent = o ? '编辑编排' : (prefill ? '套用参考做法 · 编排' : '新建编排');
+  $('#o_name').value = s ? s.name || '' : '';
+  $('#o_desc').value = s ? s.description || '' : '';
+  $('#o_steps').dataset.steps = JSON.stringify(s ? s.steps || [] : []);
   renderSteps();
   $('#orchModal').classList.remove('hidden');
   setTimeout(() => $('#o_name').focus(), 60);
@@ -1619,6 +1631,15 @@ function renderSteps() {
         <button class="step-del" data-sdel="${i}" title="删除该步骤">✕</button>
       </div>`).join('')
     : '<p class="hint">还没有步骤，点下方「+ 添加步骤」开始搭建链路。</p>';
+  // 从参考库套用过来的链路只有任务描述、没有 Agent；不提示的话用户会一路点到保存才被拦下
+  const hint = $('#o_hint');
+  if (hint) {
+    const unset = steps.filter((s) => !s.agentId).length;
+    hint.textContent = unset
+      ? `还有 ${unset} 步没选 Agent${vault.agents.length ? '，在每行左侧选一个即可' : ' —— 先去「🤖 Agents」建一个，再回来选'}。`
+      : '';
+    hint.classList.toggle('hidden', !unset);
+  }
 }
 
 function submitOrch() {
@@ -1638,6 +1659,285 @@ function submitOrch() {
   closeModal('orchModal');
   renderOrchestrations();
   saveVault(editingOrchId ? '更新编排' : '新增编排');
+}
+
+// ---------------- 参考库（离线精选，不联网搜索） ----------------
+/**
+ * 这一页刻意不做「全网 / GitHub 代码搜索」，原因是架构上就不成立：
+ *   · 走代理模式时 Worker 只放行一个数据仓库，任何别的搜索都会被 404；
+ *   · 纯静态版要在浏览器里搜代码就必须带 Token，等于把凭据发给每个打开页面的人；
+ *   · 而且「搜代码」返回的是源码片段，本来也不是提示词该有的形态。
+ * 改成：把 4 个仓库里值得抄的做法离线整理成 25 条，本地打分检索，
+ * 搜不到时给最接近的几条而不是空白 —— 打开就能用，且不消耗任何凭据。
+ * 条目与打分都在 kb.js（两版共用同一份文件）。
+ */
+let kbQuery = '';
+let kbKind = 'all';
+let kbSource = 'all';
+let kbResults = [];
+
+function renderKbFilters() {
+  const kinds = [['all', '全部类型']].concat(Object.keys(PVKB.KIND_LABEL).map((k) => [k, PVKB.KIND_LABEL[k]]));
+  const kEl = $('#kbKindFilter');
+  if (kEl) {
+    kEl.innerHTML = kinds.map(([k, l]) =>
+      `<button class="kb-chip ${kbKind === k ? 'active' : ''}" data-kbkind="${k}">${l}</button>`).join('');
+  }
+  const sources = [['all', '全部来源']].concat(PVKB.SOURCE_KEYS.map((k) => [k, PVKB.SOURCES[k].label]));
+  const sEl = $('#kbSourceFilter');
+  if (sEl) {
+    sEl.innerHTML = sources.map(([k, l]) =>
+      `<button class="kb-chip ${kbSource === k ? 'active' : ''}" data-kbsrc="${k}">${l}</button>`).join('');
+  }
+}
+
+function kbCard(e) {
+  const src = PVKB.SOURCES[e.source] || { label: e.source, repo: '' };
+  const kind = PVKB.KIND_LABEL[e.kind] || e.kind;
+  const steps = (e.steps || []).map((s, i) =>
+    `<div class="chain-step"><span class="chain-idx">${i + 1}</span><span class="chain-task">${escapeHtml(s.task || '')}</span></div>`
+  ).join('<div class="chain-arrow">↓</div>');
+  const label = e.kind === 'role' ? '套用为 Agent' : (e.kind === 'topology' ? '套用为编排' : '套用为提示词');
+  return `
+    <article class="card kb-card">
+      <div class="card-head">
+        <div style="flex:1">
+          <h3 class="card-title">${escapeHtml(e.name)}</h3>
+          <p class="card-sub kb-badges">
+            <span class="kb-badge kind-${e.kind}">${escapeHtml(kind)}</span>
+            <span class="kb-badge src-${e.source}" title="${escapeHtml(src.repo || '')}">${escapeHtml(src.label)}</span>
+          </p>
+        </div>
+      </div>
+      <div class="card-body">${escapeHtml(e.summary || e.description || '')}</div>
+      <div class="card-tags">${(e.tags || []).map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</div>
+      <div class="kb-detail hidden" data-kbdetail="${e.id}">
+        ${steps ? `<div class="chain">${steps}</div>` : ''}
+        ${e.body ? `<pre class="cap-pre kb-pre">${escapeHtml(e.body)}</pre>` : ''}
+      </div>
+      <div class="card-foot">
+        <button class="btn sm primary" data-kbapply="${e.id}">${label}</button>
+        <button class="btn sm" data-kbcopy="${e.id}">复制</button>
+        <button class="btn sm ghost" data-kbmore="${e.id}">展开</button>
+      </div>
+    </article>`;
+}
+
+function renderKb() {
+  kbResults = PVKB.search(kbQuery, { source: kbSource, kind: kbKind });
+  const grid = $('#kbGrid');
+  if (grid) grid.innerHTML = kbResults.map(kbCard).join('');
+  const empty = $('#kbEmpty');
+  if (empty) empty.classList.toggle('hidden', kbResults.length > 0);
+  const meta = $('#kbMeta');
+  if (meta) {
+    const q = kbQuery.trim();
+    meta.textContent = q
+      ? `「${q}」匹配到 ${kbResults.length} 条（精选库共 ${PVKB.ENTRIES.length} 条）`
+      : `共 ${kbResults.length} 条精选做法 · 点「套用」直接变成你的提示词 / Agent / 编排`;
+  }
+}
+
+/** 把参考条目套用到对应的弹窗里（不直接入库：套用后仍可改，确认才保存） */
+function kbApply(id) {
+  const e = PVKB.ENTRIES.find((x) => x.id === id);
+  if (!e) return;
+  const label = (PVKB.SOURCES[e.source] || {}).label || e.source;
+  if (e.kind === 'role') {
+    openAgentModal(null, PVKB.toAgent(e));
+    return toast('已按「' + label + '」的做法预填 Agent，确认后再保存');
+  }
+  if (e.kind === 'topology') {
+    openOrchModal(null, PVKB.toOrch(e));
+    return toast('已预填链路，请为每一步选择 Agent');
+  }
+  openPromptModal(null, PVKB.toPrompt(e));
+  toast('已按「' + label + '」的做法预填提示词');
+}
+
+function openKbSources() {
+  const box = $('#kbSrcBody');
+  if (!box) return;
+  box.innerHTML = PVKB.SOURCE_KEYS.map((k) => {
+    const s = PVKB.SOURCES[k];
+    const n = PVKB.ENTRIES.filter((e) => e.source === k).length;
+    return `
+      <div class="cap-block">
+        <div class="cap-kv">
+          <b>${escapeHtml(s.label)}</b> ·
+          <a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.repo)}</a> ·
+          收录 ${n} 条
+        </div>
+        <div class="cap-kv cap-dim">${escapeHtml(s.gives)}</div>
+        <div class="cap-kv cap-dim">${escapeHtml(s.note)}</div>
+      </div>`;
+  }).join('');
+  $('#kbSrcModal').classList.remove('hidden');
+}
+
+// ---------------- 提示词优化（离线结构检查 + 可选大模型重写） ----------------
+let optState = null;   // { text, result, onApply, busy }
+
+/**
+ * 传输层：两版唯一不同处。
+ * 纯静态版由浏览器直连用户自己配置的 LLM 接口；服务端版把 messages 交给本机 Node，
+ * Key 不下发浏览器。上面所有优化逻辑（提示词、判分、归一化）都在 kb.js，两版共用。
+ */
+async function optLlmChat(messages, temperature) {
+  const c = cfgDefaults();
+  const r = await fetch(c.llmBase + '/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + c.llmKey },
+    body: JSON.stringify({ model: c.llmModel, temperature, messages }),
+  });
+  const raw = await r.text();
+  if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + raw.slice(0, 160));
+  let j = null;
+  try { j = JSON.parse(raw); } catch (e) { throw new Error('返回不是 JSON'); }
+  const msg = j && j.choices && j.choices[0] && j.choices[0].message;
+  const content = msg && msg.content;
+  if (!content) throw new Error('模型返回为空');
+  return String(content);
+}
+
+/** 与大模型对话并把结果按优化器契约归一化；失败一律抛错，由调用方回退离线 */
+async function optimizeLLM(text) {
+  const content = await optLlmChat(PVKB.optLLMMessages(text), 0.3);
+  const parsed = capParseLLMJson(content);
+  if (!parsed) throw new Error('模型返回的不是 JSON');
+  const out = PVKB.normalizeOptLLM(parsed, text);
+  if (!out) throw new Error('模型没有返回可用正文');
+  return out;
+}
+
+function optSetStatus(text, cls) {
+  const el = $('#optStatus');
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = 'settings-status' + (cls ? ' ' + cls : '');
+}
+
+/**
+ * 打开优化器。
+ * onApply(新文本) 由调用方决定采用后写回哪里 —— 卡片写回条目、弹窗写回 #p_content、
+ * 捕捉结果写回 capResult.prompt.content，三种入口共用这一个弹窗。
+ */
+function openOptimizer(text, onApply) {
+  const t = String(text == null ? '' : text).trim();
+  if (!t) return toast('还没有内容可以优化', true);
+  optState = { text: t, result: null, onApply: typeof onApply === 'function' ? onApply : null, busy: false };
+  const cb = $('#optUseLLM');
+  const ready = llmReady();
+  if (cb) { cb.checked = false; }
+  const wrap = $('#optLlmWrap');
+  if (wrap) wrap.classList.toggle('hidden', !ready);
+  $('#optModal').classList.remove('hidden');
+  // 先立刻给离线结果：大模型要等网络，不能让人对着空面板等
+  optRender(PVKB.optimizeOffline(t));
+  optSetStatus(ready ? '' : '未配置 LLM（设置里可填），当前为离线结构优化', ready ? '' : 'warn');
+}
+
+function optRender(r) {
+  if (!r) return;
+  const b = r.score.before;
+  const a = r.score.after;
+  const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+  set('#optNumBefore', String(b));
+  set('#optNumAfter', String(a));
+  const bb = $('#optBarBefore'); if (bb) bb.style.width = b + '%';
+  const ab = $('#optBarAfter'); if (ab) ab.style.width = a + '%';
+  const orig = $('#optOrig'); if (orig) orig.value = optState.text;
+  const nw = $('#optNew'); if (nw) nw.value = r.improved || '';
+  set('#optOrigMeta', optState.text.length + ' 字');
+  set('#optNewMeta', String((r.improved || '').length) + ' 字');
+  const cl = $('#optChanges');
+  if (cl) {
+    const icon = { add: '＋', fix: '✎', keep: '＝', del: '－' };
+    cl.innerHTML = (r.changes && r.changes.length)
+      ? r.changes.map((c) => [
+          `<div class="opt-change opt-${escapeHtml(c.kind)}">`,
+          `<span class="opt-change-k">${icon[c.kind] || '✎'}</span>`,
+          `<b>${escapeHtml(c.label)}</b>`,
+          c.detail ? `<span class="opt-change-d">${escapeHtml(c.detail)}</span>` : '',
+          '</div>',
+        ].join('')).join('')
+      : '<p class="hint">结构已经够完整，没有需要补的部分。</p>';
+  }
+  const note = $('#optNote');
+  if (note) {
+    note.textContent = r.note || '';
+    note.classList.toggle('hidden', !r.note);
+  }
+}
+
+async function optRun() {
+  if (!optState || optState.busy) return;
+  const t = optState.text;
+  const cb = $('#optUseLLM');
+  if (!(cb && cb.checked && llmReady())) {
+    optRender(PVKB.optimizeOffline(t));
+    optSetStatus('');
+    return;
+  }
+  optState.busy = true;
+  const btn = $('#optApplyBtn');
+  if (btn) btn.disabled = true;
+  optSetStatus('正在调用大模型…');
+  try {
+    const r = await optimizeLLM(t);
+    optRender(r);
+    optSetStatus(r.score.after < r.score.before
+      ? '大模型已返回，但结构分反而更低 —— 建议对照原文再决定要不要采用'
+      : '已用大模型优化', r.score.after < r.score.before ? 'warn' : 'ok');
+  } catch (e) {
+    const fb = PVKB.optimizeOffline(t);
+    fb.note = '大模型调用失败，已回退离线优化（' + e.message + '）';
+    optRender(fb);
+    optSetStatus('大模型调用失败，已回退离线优化', 'warn');
+  } finally {
+    optState.busy = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function optApply() {
+  if (!optState) return;
+  const nw = $('#optNew');
+  const txt = (nw ? nw.value : '').trim();
+  if (!txt) return toast('优化后内容为空，没法采用', true);
+  if (txt === optState.text) {
+    closeModal('optModal');
+    return toast('内容和原文一样，没有需要改的');
+  }
+  // onApply 可能是异步的（卡片入口要落库/同步）。必须等它走完再收尾，
+  // 否则同步自己的提示会随后覆盖掉「已采用」这条消息。
+  let saved = null;
+  if (optState.onApply) {
+    try {
+      const r = optState.onApply(txt);
+      saved = r && typeof r.then === 'function' ? await r : null;
+    } catch (e) {
+      return toast('采用失败：' + e.message, true);
+    }
+  }
+  closeModal('optModal');
+  if (saved && saved.saved === 'github') return toast('已采用优化后的提示词，并已同步到云端');
+  if (saved) return toast('已采用优化后的提示词（' + (saved.warning || saved.message || '仅存本机') + '）');
+  toast('已采用优化后的提示词');
+}
+
+/** 同一个提示词集中入口：卡片、弹窗、捕捉结果三处都调它 */
+function optimizePromptById(id) {
+  const p = vault.prompts.find((x) => x.id === id);
+  if (!p) return;
+  openOptimizer(p.content || '', (txt) => {
+    p.content = txt;
+    p.updatedAt = Date.now();
+    renderPrompts();
+    // 把同步的 Promise 交还给优化器：它要等落库结束再收尾，
+    // 否则 saveVault 自己的提示会晚一步把「已采用」冲掉（真机验证时看到过）。
+    return saveVault('优化提示词');
+  });
 }
 
 // ---------------- 多选导出（含编排链路） ----------------
@@ -1999,6 +2299,61 @@ function bind() {
     if (b) switchView(b.getAttribute('data-view'));
   });
 
+  // 参考库：搜索 / 筛选只重渲染结果区，不整页重建
+  $('#kbSearch').addEventListener('input', (e) => { kbQuery = e.target.value; renderKb(); });
+  $('#kbKindFilter').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-kbkind]');
+    if (!b) return;
+    kbKind = b.getAttribute('data-kbkind') || 'all';
+    renderKbFilters();
+    renderKb();
+  });
+  $('#kbSourceFilter').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-kbsrc]');
+    if (!b) return;
+    kbSource = b.getAttribute('data-kbsrc') || 'all';
+    renderKbFilters();
+    renderKb();
+  });
+  $('#kbSrcBtn').addEventListener('click', openKbSources);
+  $('#kbGrid').addEventListener('click', (e) => {
+    const ap = e.target.closest('[data-kbapply]');
+    const cp = e.target.closest('[data-kbcopy]');
+    const mo = e.target.closest('[data-kbmore]');
+    if (ap) return kbApply(ap.getAttribute('data-kbapply'));
+    if (cp) {
+      const en = PVKB.ENTRIES.find((x) => x.id === cp.getAttribute('data-kbcopy'));
+      if (en) copyText(PVKB.kbChainText(en), '已复制「' + en.name + '」');
+      return;
+    }
+    if (mo) {
+      const card = e.target.closest('.kb-card');
+      const box = card && card.querySelector('[data-kbdetail]');
+      if (!box) return;
+      box.classList.toggle('hidden');
+      mo.textContent = box.classList.contains('hidden') ? '展开' : '收起';
+    }
+  });
+
+  // 优化器
+  $('#optUseLLM').addEventListener('change', optRun);
+  $('#optApplyBtn').addEventListener('click', optApply);
+  $('#optCopyNewBtn').addEventListener('click', () => {
+    const nw = $('#optNew');
+    copyText(nw ? nw.value : '', '优化后的提示词已复制');
+  });
+  $('#optFromPromptBtn').addEventListener('click', () => {
+    openOptimizer($('#p_content').value, (txt) => { $('#p_content').value = txt; });
+  });
+  // 捕捉结果区是动态重建的，所以走事件委托
+  $('#capResult').addEventListener('click', (e) => {
+    if (!e.target.closest('[data-capopt]') || !capResult) return;
+    openOptimizer(capResult.prompt.content || '', (txt) => {
+      capResult.prompt.content = txt;
+      renderCapResult();
+    });
+  });
+
   // 同步 / 设置
   $('#syncBtn').addEventListener('click', () => loadVault(false));
   // 手动上传入口：新增/编辑本身会自动上传，这里是「自动上传失败后重试」和「强制对齐云端」的出口。
@@ -2036,6 +2391,8 @@ function bind() {
     const c = e.target.closest('[data-pcopy]');
     const ed = e.target.closest('[data-pedit]');
     const dl = e.target.closest('[data-pdel]');
+    const op = e.target.closest('[data-popt]');
+    if (op) return optimizePromptById(op.getAttribute('data-popt'));
     if (c) { const p = vault.prompts.find((x) => x.id === c.getAttribute('data-pcopy')); return copyText(p.content || '', '提示词已复制'); }
     if (ed) return openPromptModal(ed.getAttribute('data-pedit'));
     if (dl) {
